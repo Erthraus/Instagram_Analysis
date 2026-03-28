@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build artifacts
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.*
+*.local
+
+# Chrome extension — local credentials (real client IDs stored here, NOT in manifest.json)
+chrome_extension/local_config.json
+
+# Instagram session files (NEVER commit — contains authentication cookies)
+session_*
+
+# Local data snapshots (personal Instagram data)
+*_data.json
+
+# Python cache
+*.pyc
+__pycache__/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Claude Code (local AI assistant settings — not relevant for contributors)
+.claude/
+
+# Editor
+.vscode/settings.json
+.idea/
+
+# Logs
+*.log

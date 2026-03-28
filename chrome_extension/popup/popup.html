@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>IG Analytics</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <header>
+        <span class="logo">IG Analytics</span>
+        <div class="header-actions">
+            <button id="btn-lang" class="btn-lang">EN</button>
+            <button id="btn-sync" class="btn-primary"><span class="icon">&#8635;</span> Sync</button>
+            <button id="btn-force-sync" class="btn-force" id-i18n-title="forceTip">⚡</button>
+        </div>
+    </header>
+
+    <div id="status-bar" class="status-bar hidden">
+        <span id="status-text"></span>
+    </div>
+
+    <!-- Auth Error -->
+    <div id="view-auth-error" class="view hidden">
+        <div class="empty-state">
+            <div class="empty-icon">&#128274;</div>
+            <p id="auth-message"><strong>instagram.com</strong>'a giriş yap, sonra Sync'e bas.</p>
+        </div>
+    </div>
+
+    <!-- Loading -->
+    <div id="view-loading" class="view hidden">
+        <div class="empty-state">
+            <div class="spinner"></div>
+            <p id="loading-text">Yükleniyor...</p>
+        </div>
+    </div>
+
+    <!-- Results -->
+    <div id="view-results" class="view hidden">
+        <div class="summary-grid">
+            <div class="summary-card card-lost"      data-category="lost">
+                <div class="card-count" id="count-lost">—</div>
+                <div class="card-label" id="label-lost">Takipten Çıkan</div>
+            </div>
+            <div class="summary-card card-notback"   data-category="not_back">
+                <div class="card-count" id="count-not_back">—</div>
+                <div class="card-label" id="label-not_back">Geri Takip Etmeyen</div>
+            </div>
+            <div class="summary-card card-new"       data-category="new">
+                <div class="card-count" id="count-new">—</div>
+                <div class="card-label" id="label-new">Yeni Takipçi</div>
+            </div>
+            <div class="summary-card card-fans"      data-category="fans">
+                <div class="card-count" id="count-fans">—</div>
+                <div class="card-label" id="label-fans">Karşılıksız</div>
+            </div>
+            <div class="summary-card card-frozen"    data-category="deactivated">
+                <div class="card-count" id="count-deactivated">—</div>
+                <div class="card-label" id="label-deactivated">Dondurulmuş</div>
+            </div>
+            <div class="summary-card card-ghost"     data-category="engagement">
+                <div class="card-count" id="count-ghost">—</div>
+                <div class="card-label" id="label-ghost">Hayalet</div>
+            </div>
+        </div>
+
+        <div class="tab-bar">
+            <button class="tab-btn active" data-category="lost"        id="tab-lost">Çıkanlar</button>
+            <button class="tab-btn"        data-category="not_back"    id="tab-not_back">Geri Yok</button>
+            <button class="tab-btn"        data-category="new"         id="tab-new">Yeni</button>
+            <button class="tab-btn"        data-category="fans"        id="tab-fans">Karşılıksız</button>
+            <button class="tab-btn"        data-category="deactivated" id="tab-deactivated">Donmuş</button>
+            <button class="tab-btn"        data-category="engagement"  id="tab-engagement">Etkileşim</button>
+        </div>
+
+        <div id="user-list" class="user-list"></div>
+        <div class="footer" id="last-sync-text">Son sync: hiç</div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#833AB4"/>
+      <stop offset="50%"  stop-color="#E1306C"/>
+      <stop offset="100%" stop-color="#F77737"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect width="128" height="128" rx="24" ry="24" fill="url(#bg)"/>
+  <!-- Analytics bars (3 bars, ascending height) -->
+  <rect x="22" y="57" width="24" height="51" rx="4" fill="white" opacity="0.9"/>
+  <rect x="52" y="37" width="24" height="71" rx="4" fill="white" opacity="0.9"/>
+  <rect x="82" y="20" width="24" height="88" rx="4" fill="white" opacity="0.9"/>
+</svg>
