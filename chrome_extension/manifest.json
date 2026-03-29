@@ -3,7 +3,7 @@
   "name": "ERTHRAUS | IG Analytics",
   "version": "1.0.0",
   "description": "Decentralized Instagram analytics: track unfollowers, frozen accounts, and audience changes. Data stored in your own Google Drive.",
-  "permissions": ["cookies", "storage", "identity", "alarms"],
+  "permissions": ["cookies", "storage", "identity", "alarms", "unlimitedStorage"],
   "host_permissions": [
     "https://www.instagram.com/*",
     "https://www.googleapis.com/*",
@@ -30,7 +30,7 @@
     }
   ],
   "oauth2": {
-    "client_id": "YOUR_CHROME_EXTENSION_OAUTH_CLIENT_ID.apps.googleusercontent.com",
+    "client_id": "102019560448-mo8eifplmqqlgsnu2fosjprnil5e2tar.apps.googleusercontent.com",
     "scopes": ["https://www.googleapis.com/auth/drive.appdata"]
   },
   "icons": {

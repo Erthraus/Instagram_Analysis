@@ -11,7 +11,9 @@ build/
 .env.*
 *.local
 
-# Chrome extension — local credentials (real client IDs stored here, NOT in manifest.json)
+# Chrome extension — local config overrides
+# Note: OAuth client_id in manifest.json is NOT a secret for Chrome extensions.
+# It's restricted to the extension's Chrome Web Store ID and only works with drive.appdata scope.
 chrome_extension/local_config.json
 
 # Instagram session files (NEVER commit — contains authentication cookies)

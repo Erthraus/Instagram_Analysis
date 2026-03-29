@@ -12,29 +12,34 @@
  * @returns {Object} diff result
  */
 export function computeDiff(oldSnapshot, newSnapshot) {
-    const newFollowerIds = new Set(newSnapshot.followers.map(u => u.pk));
-    const newFollowingIds = new Set(newSnapshot.following.map(u => u.pk));
+    const newFollowers  = newSnapshot.followers  ?? [];
+    const newFollowing  = newSnapshot.following  ?? [];
 
-    const not_back = newSnapshot.following.filter(u => !newFollowerIds.has(u.pk));
-    const fans = newSnapshot.followers.filter(u => !newFollowingIds.has(u.pk));
+    const newFollowerIds  = new Set(newFollowers.map(u => u.pk));
+    const newFollowingIds = new Set(newFollowing.map(u => u.pk));
+
+    const not_back = newFollowing.filter(u => !newFollowerIds.has(u.pk));
+    const fans     = newFollowers.filter(u => !newFollowingIds.has(u.pk));
 
     let lost = [];
-    let newFollowers = [];
+    let newFollowersList = [];
     let deactivated = [];
 
-    if (oldSnapshot) {
-        const oldFollowerIds = new Set(oldSnapshot.followers.map(u => u.pk));
-        const oldDeactivatedIds = new Set((oldSnapshot.stats?.deactivated || []).map(u => u.pk));
-        const oldTrueLostIds = new Set((oldSnapshot.stats?.lost || []).map(u => u.pk));
+    if (oldSnapshot && oldSnapshot.userId === newSnapshot.userId) {
+        const oldFollowers  = oldSnapshot.followers  ?? [];
+        const oldFollowing  = oldSnapshot.following  ?? [];
+        const oldFollowerIds    = new Set(oldFollowers.map(u => u.pk));
+        const oldDeactivatedIds = new Set((oldSnapshot.stats?.deactivated ?? []).map(u => u.pk));
+        const oldTrueLostIds    = new Set((oldSnapshot.stats?.lost        ?? []).map(u => u.pk));
 
         // Build pk → user map for old snapshot (to preserve display data for lost users)
         const oldUserMap = {};
-        for (const u of [...oldSnapshot.followers, ...oldSnapshot.following]) {
+        for (const u of [...oldFollowers, ...oldFollowing]) {
             oldUserMap[u.pk] = u;
         }
 
         const rawLostIds = [...oldFollowerIds].filter(id => !newFollowerIds.has(id));
-        newFollowers = newSnapshot.followers.filter(u => !oldFollowerIds.has(u.pk));
+        newFollowersList = newFollowers.filter(u => !oldFollowerIds.has(u.pk));
 
         // Re-use previous classifications where possible
         for (const pk of rawLostIds) {
@@ -50,7 +55,7 @@ export function computeDiff(oldSnapshot, newSnapshot) {
         }
     }
 
-    return { lost, newFollowers, not_back, fans, deactivated };
+    return { lost, newFollowers: newFollowersList, not_back, fans, deactivated };
 }
 
 /**
@@ -88,6 +93,8 @@ export function applyStatusChecks(diff, statusMap) {
  * Merges with previous map to preserve data for lost users.
  */
 export function buildFullMap(followers, following, previousMap = {}) {
+    const followerSet  = new Set(followers.map(u => u.pk));
+    const followingSet = new Set(following.map(u => u.pk));
     const map = { ...previousMap };
     for (const u of [...followers, ...following]) {
         map[u.pk] = {
@@ -95,8 +102,17 @@ export function buildFullMap(followers, following, previousMap = {}) {
             username:        u.username,
             full_name:       u.full_name,
             profile_pic_url: u.profile_pic_url || null,
-            is_verified:     u.is_verified     || false
+            is_verified:     u.is_verified     || false,
+            is_follower:     followerSet.has(u.pk),
+            is_following:    followingSet.has(u.pk)
         };
+    }
+    // Clear flags for users who dropped out (they're in previousMap but not current lists)
+    for (const pk of Object.keys(map)) {
+        if (!followerSet.has(pk) && !followingSet.has(pk)) {
+            map[pk].is_follower  = false;
+            map[pk].is_following = false;
+        }
     }
     return map;
 }

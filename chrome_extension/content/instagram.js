@@ -69,9 +69,11 @@ function sendProgress(step, detail = "") {
 
 // ── Sayfalı fetch ─────────────────────────────────────────────────────────────
 
+const MAX_PAGINATED_PAGES = 500; // güvenlik sınırı — takipçi/takip için yeterli
+
 async function fetchPaginated(urlFn, csrfToken, dataKey = "users") {
     const results = [];
-    let cursor = null, attempt = 0;
+    let cursor = null, attempt = 0, pages = 0;
     do {
         const res = await fetchWithTimeout(urlFn(cursor), { headers: igHeaders(csrfToken), credentials: "include" });
         if (res.status === 429 || res.status === 401) {
@@ -89,9 +91,10 @@ async function fetchPaginated(urlFn, csrfToken, dataKey = "users") {
         results.push(...(data[dataKey] || []));
         cursor = data.next_max_id || null;
         attempt = 0;
-        sendProgress("fetching", `${results.length}`);
+        pages++;
+        sendProgress("fetching", `${results.length} (${pages}. sayfa)`);
         if (cursor) await jitter();
-    } while (cursor);
+    } while (cursor && pages < MAX_PAGINATED_PAGES);
     return results;
 }
 
@@ -111,32 +114,41 @@ async function fetchPostLikes(userId, csrfToken) {
     sendProgress("engagement", "Gönderiler çekiliyor...");
 
     // Sayfalı gönderi çekici — tüm gönderileri getirir, sınır yok
-    async function fetchFeedAll(baseUrl) {
+    // progressLabel: ilerleme mesajında gösterilecek etiket
+    async function fetchFeedAll(baseUrl, progressLabel = "Gönderi") {
         const items = [];
-        let cursor = null;
+        let cursor = null, pages = 0;
+        const MAX_FEED_PAGES = 300; // ~10.000 gönderi — sonsuz döngüye karşı guard
         do {
             const url = `${baseUrl}${cursor ? `&max_id=${cursor}` : ""}`;
             try {
                 const res = await fetchWithTimeout(url, { headers: igHeaders(csrfToken), credentials: "include" });
                 if (!res.ok) break;
                 const data = await res.json();
-                items.push(...(data.items || []));
+                const batch = data.items || [];
+                items.push(...batch);
                 cursor = data.next_max_id || null;
-                if ((data.items || []).length === 0) break;
+                if (batch.length === 0) break;
+                pages++;
+                sendProgress("engagement", `${progressLabel}: ${items.length} (sayfa ${pages})`);
                 if (cursor) await jitter(POST_DELAY);
             } catch { break; }
-        } while (cursor);
+        } while (cursor && pages < MAX_FEED_PAGES);
         return items;
     }
 
     // Aktif gönderiler (tümü)
     try {
-        posts.push(...await fetchFeedAll(`https://www.instagram.com/api/v1/feed/user/${userId}/?count=33`));
+        const active = await fetchFeedAll(`https://www.instagram.com/api/v1/feed/user/${userId}/?count=33`, "Aktif gönderi");
+        posts.push(...active);
+        sendProgress("engagement", `Aktif gönderiler tamamlandı: ${active.length}`);
     } catch { /* aktif gönderi fetch başarısız */ }
 
     // Arşivlenmiş gönderiler (tümü)
     try {
-        posts.push(...await fetchFeedAll(`https://www.instagram.com/api/v1/feed/only_me_feed/?count=33`));
+        const archived = await fetchFeedAll(`https://www.instagram.com/api/v1/feed/only_me_feed/?count=33`, "Arşiv gönderi");
+        posts.push(...archived);
+        sendProgress("engagement", `Arşiv gönderiler tamamlandı: ${archived.length}`);
     } catch { /* arşiv gönderi fetch başarısız */ }
 
     // pk'ya göre tekil yap
@@ -188,13 +200,14 @@ async function fetchStoryItems(userId, csrfToken) {
     // Hikaye arşivi — son 14 güne kadar (Instagram viewer verisini 14 gün tutar)
     // Tüm shell'leri sayfalı çek
     try {
-        let cursor = null;
+        let cursor = null, shellPage = 0;
         do {
             const url = `https://www.instagram.com/api/v1/archive/reel/day_shells/${cursor ? `?max_id=${cursor}` : ""}`;
             const res = await fetchWithTimeout(url, { headers: igHeaders(csrfToken), credentials: "include" });
             if (!res.ok) break;
             const data = await res.json();
             const shells = data.items || [];
+            shellPage++;
 
             let reachedOld = false;
             for (const shell of shells) {
@@ -208,6 +221,7 @@ async function fetchStoryItems(userId, csrfToken) {
                 items.push(...shellItems);
             }
 
+            sendProgress("engagement", `Hikaye arşivi taranıyor... ${items.length} hikaye (${shellPage}. gün grubu)`);
             cursor = (!reachedOld && data.next_max_id) ? data.next_max_id : null;
             if (cursor) await jitter(POST_DELAY);
         } while (cursor);
@@ -345,25 +359,25 @@ async function runAnalysis() {
     // Aşama 1 — Takipçiler
     if (cp?.phase === "following" || cp?.phase === "engagement" || cp?.phase === "requests" || cp?.phase === "done") {
         followers = cp.followers;
-        sendProgress("followers_cached", `${followers.length}`);
+        sendProgress("followers_cached", `${followers.length} takipçi (önbellek)`);
     } else {
-        sendProgress("followers");
+        sendProgress("followers", "Takipçiler yükleniyor...");
         followers = await fetchFollowers(userId, csrfToken);
         await DB.set("sync_checkpoint", { version: CHECKPOINT_VERSION, phase: "following", userId, followers, timestamp: Date.now() });
-        sendProgress("followers_done", `${followers.length}`);
+        sendProgress("followers_done", `${followers.length} takipçi alındı`);
     }
 
     // Aşama 2 — Takip edilenler
     if (cp?.phase === "engagement" || cp?.phase === "requests" || cp?.phase === "done") {
         following = cp.following;
-        sendProgress("following_cached", `${following.length}`);
+        sendProgress("following_cached", `${following.length} takip (önbellek)`);
     } else {
-        sendProgress("pause");
+        sendProgress("pause", "Kısa bekleme...");
         await sleep(PHASE_DELAY);
-        sendProgress("following");
+        sendProgress("following", "Takip edilenler yükleniyor...");
         following = await fetchFollowing(userId, csrfToken);
         await DB.set("sync_checkpoint", { version: CHECKPOINT_VERSION, phase: "engagement", userId, followers, following, timestamp: Date.now() });
-        sendProgress("following_done", `${following.length}`);
+        sendProgress("following_done", `${following.length} takip alındı`);
     }
 
     // Aşama 3 — Etkileşim (gönderi + hikaye)
@@ -380,27 +394,37 @@ async function runAnalysis() {
     let requests = cp?.phase === "done" ? cp.requests : null;
     if (!requests) {
         await sleep(PHASE_DELAY);
-        sendProgress("requests");
+        sendProgress("requests", "Bekleyen takip istekleri alınıyor...");
         const pending = await fetchPendingRequests(csrfToken);
         requests = { pending };
         await DB.set("sync_checkpoint", { version: CHECKPOINT_VERSION, phase: "done", userId, followers, following, engagement, requests, timestamp: Date.now() });
+        sendProgress("requests_done", `${pending.length} istek`);
     }
 
-    // Tamamlandı
+    // Tamamlandı — veriyi chrome.storage.local'a yaz, ardından küçük bildirim gönder.
+    // Büyük hesaplarda chrome.runtime.sendMessage boyut limitine takılır ve sessizce düşer.
+    // Storage'a yazmak bu sorunu tamamen ortadan kaldırır.
+    sendProgress("saving", "Veriler işleniyor...");
     await DB.set("sync_checkpoint", null);
 
-    chrome.runtime.sendMessage({
-        type: "ANALYSIS_COMPLETE",
-        snapshot: {
-            timestamp: new Date().toISOString(),
-            userId,
-            currentUser,
-            followers: followers.map(mapUser),
-            following: following.map(mapUser),
-            engagement,
-            requests
-        }
-    }).catch(() => {});
+    const snapshot = {
+        timestamp: new Date().toISOString(),
+        userId,
+        currentUser,
+        followers: followers.map(mapUser),
+        following: following.map(mapUser),
+        engagement,
+        requests
+    };
+
+    try {
+        await chrome.storage.local.set({ analysis_snapshot: snapshot });
+    } catch (err) {
+        throw new Error(`Veri kaydedilemedi (storage): ${err.message || "bilinmeyen hata"}`);
+    }
+
+    // Küçük bildirim — payload yok, background storage'dan okuyacak
+    chrome.runtime.sendMessage({ type: "ANALYSIS_COMPLETE" }).catch(() => {});
 }
 
 // ── Mesaj Dinleyici ───────────────────────────────────────────────────────────
@@ -421,7 +445,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function checkAccountStatus(username, csrfToken) {
     try {
-        const res = await fetch(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`, { headers: igHeaders(csrfToken), credentials: "include" });
+        const res = await fetchWithTimeout(`https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`, { headers: igHeaders(csrfToken), credentials: "include" });
         if (res.status === 404) return "deleted";
         if (!res.ok) return "unknown";
         const data = await res.json();

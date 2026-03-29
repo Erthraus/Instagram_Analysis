@@ -6,29 +6,64 @@
  * Dosya adı: Analytics_Snapshot_{userId}.json
  */
 
-const DRIVE_BASE  = "https://www.googleapis.com/drive/v3";
-const UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3";
-const FILE_PREFIX = "Analytics_Snapshot_";
+const DRIVE_BASE       = "https://www.googleapis.com/drive/v3";
+const UPLOAD_BASE      = "https://www.googleapis.com/upload/drive/v3";
+const FILE_PREFIX      = "Analytics_Snapshot_";
+const QUERY_TIMEOUT_MS = 15_000;  // metadata queries (fast)
+const UPLOAD_TIMEOUT_MS = 90_000; // file upload (allow for slow connections / large files)
+const TOKEN_TIMEOUT_MS  = 15_000; // getAuthToken timeout
 
 export function getFileName(userId) {
     return `${FILE_PREFIX}${userId}.json`;
 }
 
 export function getToken(interactive = true) {
-    return new Promise((resolve, reject) => {
-        chrome.identity.getAuthToken({ interactive }, (token) => {
-            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-            else resolve(token);
-        });
-    });
+    return Promise.race([
+        new Promise((resolve, reject) => {
+            chrome.identity.getAuthToken({ interactive }, (token) => {
+                if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                else if (!token) reject(new Error("DRIVE_AUTH_EXPIRED"));
+                else resolve(token);
+            });
+        }),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("DRIVE_AUTH_EXPIRED")), TOKEN_TIMEOUT_MS)
+        )
+    ]);
+}
+
+/** fetch with a hard timeout via AbortController */
+function fetchWithTimeout(url, opts, ms = QUERY_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    return fetch(url, { ...opts, signal: controller.signal })
+        .finally(() => clearTimeout(timer));
+}
+
+/** Translate HTTP status codes to user-readable error codes */
+function throwDriveError(status, context = "") {
+    if (status === 401) throw new Error("DRIVE_AUTH_EXPIRED");
+    if (status === 403) throw new Error("DRIVE_NO_PERMISSION");
+    if (status === 429) throw new Error("DRIVE_RATE_LIMITED");
+    throw new Error(`DRIVE_ERROR_${status}${context ? ": " + context : ""}`);
+}
+
+/** Safe JSON parse — avoids crash if Drive returns an HTML error page */
+async function safeJson(res) {
+    const ct = res.headers.get("content-type") || "";
+    if (!ct.includes("application/json")) {
+        const text = await res.text();
+        throw new Error(`DRIVE_UNEXPECTED_RESPONSE: ${text.slice(0, 120)}`);
+    }
+    return res.json();
 }
 
 async function findFileId(token, userId) {
     const name = getFileName(userId);
     const url = `${DRIVE_BASE}/files?spaces=appDataFolder&q=name%3D'${encodeURIComponent(name)}'&fields=files(id)`;
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error(`Drive list failed: ${res.status}`);
-    const json = await res.json();
+    const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throwDriveError(res.status, "list");
+    const json = await safeJson(res);
     return json.files?.[0]?.id || null;
 }
 
@@ -69,20 +104,17 @@ export async function saveSnapshot(snapshot) {
         ? `${UPLOAD_BASE}/files/${existingId}?uploadType=multipart`
         : `${UPLOAD_BASE}/files?uploadType=multipart`;
 
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
         method: existingId ? "PATCH" : "POST",
         headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": `multipart/related; boundary=${boundary}`
         },
         body
-    });
+    }, UPLOAD_TIMEOUT_MS);
 
-    if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`Drive kaydetme hatası (${res.status}): ${errText}`);
-    }
-    return res.json();
+    if (!res.ok) throwDriveError(res.status, "save");
+    return safeJson(res);
 }
 
 /**
@@ -93,9 +125,38 @@ export async function loadSnapshot(userId) {
     const fileId = await findFileId(token, userId);
     if (!fileId) return null;
 
-    const res = await fetch(`${DRIVE_BASE}/files/${fileId}?alt=media`, {
+    const res = await fetchWithTimeout(`${DRIVE_BASE}/files/${fileId}?alt=media`, {
         headers: { Authorization: `Bearer ${token}` }
     });
-    if (!res.ok) throw new Error(`Drive okuma hatası: ${res.status}`);
-    return res.json();
+    if (!res.ok) throwDriveError(res.status, "load");
+    return safeJson(res);
+}
+
+/**
+ * List all snapshot files for the account switcher UI.
+ * Returns [{ id, name, userId, modifiedTime }, ...]
+ */
+export async function listSnapshots(token) {
+    const q = encodeURIComponent(`name contains '${FILE_PREFIX}'`);
+    const url = `${DRIVE_BASE}/files?spaces=appDataFolder&q=${q}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc`;
+    const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throwDriveError(res.status, "list-all");
+    const json = await safeJson(res);
+    return (json.files || []).map(f => ({
+        id:           f.id,
+        name:         f.name,
+        userId:       f.name.replace(FILE_PREFIX, "").replace(".json", ""),
+        modifiedTime: f.modifiedTime,
+    }));
+}
+
+/**
+ * Load a snapshot by Drive file ID (used by account switcher).
+ */
+export async function loadSnapshotById(token, fileId) {
+    const res = await fetchWithTimeout(`${DRIVE_BASE}/files/${fileId}?alt=media`, {
+        headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throwDriveError(res.status, "load-by-id");
+    return safeJson(res);
 }

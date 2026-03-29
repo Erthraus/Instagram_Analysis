@@ -20,7 +20,11 @@ function openDB() {
                 db.createObjectStore(STORE_NAME);
             }
         };
-        req.onsuccess = (e) => { _db = e.target.result; resolve(_db); };
+        req.onsuccess = (e) => {
+            _db = e.target.result;
+            _db.onerror = () => { _db = null; }; // reset on unexpected connection error
+            resolve(_db);
+        };
         req.onerror = (e) => reject(e.target.error);
     });
 }
@@ -45,12 +49,18 @@ function set(key, value) {
 
 /**
  * Rotate snapshots: current → previous, then store new current.
- * Call this before saving a new snapshot.
+ * If the account changed, the previous snapshot is cleared to prevent
+ * cross-account diffs (e.g. Account B diffed against Account A's followers).
  */
 export async function rotateAndSave(newSnapshot) {
     const current = await get("current_snapshot");
     if (current) {
-        await set("previous_snapshot", current);
+        if (current.userId !== newSnapshot.userId) {
+            // Different account — don't carry over old history
+            await set("previous_snapshot", null);
+        } else {
+            await set("previous_snapshot", current);
+        }
     }
     await set("current_snapshot", newSnapshot);
 }

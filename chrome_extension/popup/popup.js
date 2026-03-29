@@ -15,6 +15,7 @@ const I18N = {
         lastSyncNever:   "Son sync: hiç",
         lastSyncPrefix:  "Son sync:",
         forceTip:        "Cooldown'ı atla (geliştirici)",
+        syncTimeout:     "Senkronizasyon zaman aşımına uğradı. Tekrar deneyin.",
         // card labels
         cardLost:        "Takipten Çıkan",
         cardNotBack:     "Geri Takip Etmeyen",
@@ -29,7 +30,7 @@ const I18N = {
         tabFans:         "Karşılıksız",
         tabFrozen:       "Donmuş",
         tabEng:          "Etkileşim",
-        // auth message (HTML)
+        // auth message (HTML — this is static, not user-provided, so safe)
         authMsg:         "<strong>instagram.com</strong>'a giriş yap, sonra Sync'e bas.",
         // progress steps
         pAuth:           "Kimlik doğrulanıyor...",
@@ -46,6 +47,7 @@ const I18N = {
         pRateLimit:      "Hız sınırı, bekleniyor...",
         pFetching:       "Çekiliyor...",
         pRequests:       "Takip istekleri alınıyor...",
+        pSaving:         "İşleniyor...",
     },
     en: {
         syncStart:       "Connecting to Instagram...",
@@ -61,6 +63,7 @@ const I18N = {
         lastSyncNever:   "Last sync: never",
         lastSyncPrefix:  "Last sync:",
         forceTip:        "Bypass cooldown (dev)",
+        syncTimeout:     "Sync timed out. Please try again.",
         // card labels
         cardLost:        "Unfollowers",
         cardNotBack:     "Not Following Back",
@@ -75,7 +78,7 @@ const I18N = {
         tabFans:         "One-Sided",
         tabFrozen:       "Frozen",
         tabEng:          "Engagement",
-        // auth message (HTML)
+        // auth message
         authMsg:         "Log in to <strong>instagram.com</strong>, then press Sync.",
         // progress steps
         pAuth:           "Authenticating...",
@@ -92,6 +95,7 @@ const I18N = {
         pRateLimit:      "Rate limited, waiting...",
         pFetching:       "Fetching...",
         pRequests:       "Fetching follow requests...",
+        pSaving:         "Processing...",
     }
 };
 
@@ -99,11 +103,9 @@ let currentLang = "tr";
 function t(key) { return I18N[currentLang]?.[key] ?? I18N.tr[key] ?? key; }
 
 function applyLanguage() {
-    // Update lang toggle button
     document.getElementById("btn-lang").textContent = currentLang === "tr" ? "EN" : "TR";
     document.documentElement.lang = currentLang;
 
-    // Card labels
     document.getElementById("label-lost").textContent        = t("cardLost");
     document.getElementById("label-not_back").textContent    = t("cardNotBack");
     document.getElementById("label-new").textContent         = t("cardNew");
@@ -111,7 +113,6 @@ function applyLanguage() {
     document.getElementById("label-deactivated").textContent = t("cardFrozen");
     document.getElementById("label-ghost").textContent       = t("cardGhost");
 
-    // Tab labels
     document.getElementById("tab-lost").textContent        = t("tabLost");
     document.getElementById("tab-not_back").textContent    = t("tabNotBack");
     document.getElementById("tab-new").textContent         = t("tabNew");
@@ -119,20 +120,38 @@ function applyLanguage() {
     document.getElementById("tab-deactivated").textContent = t("tabFrozen");
     document.getElementById("tab-engagement").textContent  = t("tabEng");
 
-    // Auth message
+    // authMsg is a static string (not user data), safe to use innerHTML
     document.getElementById("auth-message").innerHTML = t("authMsg");
-
-    // Force sync title
     document.getElementById("btn-force-sync").title = t("forceTip");
 
-    // Footer (only if "never")
     const footer = document.getElementById("last-sync-text");
     if (footer.dataset.never === "true") footer.textContent = t("lastSyncNever");
 
-    // Re-render engagement tab if currently active
     if (currentStats && currentCategory === "engagement") {
         renderEngagementTab(currentStats.engagement_summary || {});
     }
+}
+
+// ── Security helpers ──────────────────────────────────────────────────────────
+
+/** Escape user-provided strings before inserting into innerHTML */
+function esc(str) {
+    return String(str ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+// ── Toast notifications ───────────────────────────────────────────────────────
+
+function showToast(msg, type = "error") {
+    const toast = document.createElement("div");
+    toast.className = `toast toast-${type}`;
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
 }
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -151,14 +170,30 @@ const lastSyncText  = document.getElementById("last-sync-text");
 
 let currentCategory = "lost";
 let currentStats    = null;
+let syncTimeoutId   = null;
+let storagePollId   = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
-    // Load saved language
-    chrome.storage.local.get(["popup_lang"], ({ popup_lang }) => {
-        if (popup_lang) currentLang = popup_lang;
+    chrome.storage.local.get(["popup_lang"], (data) => {
+        if (data.popup_lang) currentLang = data.popup_lang;
         applyLanguage();
+    });
+
+    // Restore busy state if a sync was already in progress when popup was (re)opened
+    chrome.storage.local.get(["sync_in_progress", "sync_heartbeat", "sync_last_step", "sync_last_detail"], (data) => {
+        if (data.sync_in_progress && data.sync_heartbeat) {
+            const age = Date.now() - data.sync_heartbeat;
+            if (age < HEARTBEAT_MAX_AGE_MS) {
+                setSyncBusy(true);
+                resetInactivityTimer();
+                startStoragePoll();
+                const step = data.sync_last_step || "";
+                const detail = data.sync_last_detail || "";
+                showStatus(step ? `${step}${detail ? ": " + detail : ""}` : t("syncStart"));
+            }
+        }
     });
 
     const res = await bgMessage({ type: "GET_DIFF" });
@@ -169,10 +204,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         loadingText.textContent = t("noData");
     }
 
-    chrome.storage.local.get(["last_run_time"], ({ last_run_time }) => {
-        if (last_run_time) {
+    chrome.storage.local.get(["last_run_time"], (data) => {
+        if (data.last_run_time) {
             lastSyncText.dataset.never = "false";
-            lastSyncText.textContent = `${t("lastSyncPrefix")} ${new Date(last_run_time).toLocaleString(currentLang === "tr" ? "tr-TR" : "en-GB")}`;
+            lastSyncText.textContent = `${t("lastSyncPrefix")} ${new Date(data.last_run_time).toLocaleString(currentLang === "tr" ? "tr-TR" : "en-GB")}`;
         } else {
             lastSyncText.dataset.never = "true";
             lastSyncText.textContent = t("lastSyncNever");
@@ -186,29 +221,93 @@ btnLang.addEventListener("click", () => {
     currentLang = currentLang === "tr" ? "en" : "tr";
     chrome.storage.local.set({ popup_lang: currentLang });
     applyLanguage();
-    // Re-render if data is loaded
     if (currentStats) renderList(currentCategory, currentStats);
 });
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
 
+// Inactivity timeout: 10 minutes without any heartbeat → assume stuck.
+// Primary: resets on every PROGRESS_UPDATE message.
+// Fallback: storage poll every 30s checks sync_heartbeat independently.
+const INACTIVITY_TIMEOUT_MS   = 10 * 60 * 1000;
+const HEARTBEAT_MAX_AGE_MS    =  4 * 60 * 1000; // stale after 4 min
+const STORAGE_POLL_INTERVAL   = 30_000;
+
+function setSyncBusy(busy) {
+    btnSync.disabled = busy;
+    btnForceSync.disabled = busy;
+    if (!busy) {
+        clearTimeout(syncTimeoutId);
+        syncTimeoutId = null;
+        clearInterval(storagePollId);
+        storagePollId = null;
+    }
+}
+
+function resetInactivityTimer() {
+    clearTimeout(syncTimeoutId);
+    syncTimeoutId = setTimeout(() => {
+        setSyncBusy(false);
+        hideStatus();
+        showToast(t("syncTimeout"), "warning");
+    }, INACTIVITY_TIMEOUT_MS);
+}
+
+/** Fallback: poll storage every 30s. If heartbeat is fresh, keep busy state alive.
+ *  If heartbeat is missing/stale AND sync_in_progress is false, release buttons.  */
+function startStoragePoll() {
+    clearInterval(storagePollId);
+    storagePollId = setInterval(() => {
+        // Guard: if buttons are already re-enabled (SYNC_COMPLETE already handled),
+        // stop the poll. Prevents an in-flight storage.get callback from re-showing
+        // the status bar after the sync has already completed.
+        if (!btnSync.disabled) {
+            clearInterval(storagePollId);
+            storagePollId = null;
+            return;
+        }
+        chrome.storage.local.get(["sync_in_progress", "sync_heartbeat", "sync_last_step", "sync_last_detail"], (data) => {
+            // Re-check after the async storage read — state may have changed.
+            if (!btnSync.disabled) return;
+            if (!data.sync_in_progress) {
+                // Background finished (or never started) — release
+                setSyncBusy(false);
+                hideStatus();
+                return;
+            }
+            if (data.sync_heartbeat) {
+                const age = Date.now() - data.sync_heartbeat;
+                if (age < HEARTBEAT_MAX_AGE_MS) {
+                    // Still active — show last known step and reset inactivity timer
+                    const step = data.sync_last_step || "";
+                    const detail = data.sync_last_detail || "";
+                    if (step) showStatus(`${step}${detail ? ": " + detail : ""}`);
+                    resetInactivityTimer();
+                }
+                // If age > HEARTBEAT_MAX_AGE_MS, inactivity timer will fire on its own
+            }
+        });
+    }, STORAGE_POLL_INTERVAL);
+}
+
 async function startSync(force = false) {
-    btnSync.disabled = true;
-    btnForceSync.disabled = true;
+    setSyncBusy(true);
+    resetInactivityTimer();
+    startStoragePoll();
     showStatus(force ? t("forceStart") : t("syncStart"));
     try {
         const res = await bgMessage({ type: force ? "FORCE_SYNC" : "RUN_SYNC" });
         if (!res.ok) {
+            setSyncBusy(false);
             showStatus(res.error || t("syncFail"), true);
-            btnSync.disabled = false;
-            btnForceSync.disabled = false;
+            showToast(res.error || t("syncFail"), "error");
         } else {
             showStatus(t("fetchFollowers"));
         }
     } catch (err) {
+        setSyncBusy(false);
         showStatus(err.message, true);
-        btnSync.disabled = false;
-        btnForceSync.disabled = false;
+        showToast(err.message, "error");
     }
 }
 
@@ -242,42 +341,63 @@ chrome.runtime.onMessage.addListener((message) => {
 
     const LABELS = {
         auth:              t("pAuth"),
-        followers:         t("pFollowers"),
-        followers_cached:  t("pFollowersCached"),
-        followers_done:    t("pFollowersDone"),
+        followers:         `${t("pFollowers")} ${detail}`.trim(),
+        followers_cached:  `${t("pFollowersCached")} ${detail}`.trim(),
+        followers_done:    `${t("pFollowersDone")} ${detail}`.trim(),
         pause:             t("pPause"),
-        following:         t("pFollowing"),
-        following_cached:  t("pFollowingCached"),
-        following_done:    t("pFollowingDone"),
+        following:         `${t("pFollowing")} ${detail}`.trim(),
+        following_cached:  `${t("pFollowingCached")} ${detail}`.trim(),
+        following_done:    `${t("pFollowingDone")} ${detail}`.trim(),
         engagement_start:  t("pEngStart"),
-        engagement:        `${t("pEng")} ${detail}`,
+        engagement:        `${t("pEng")} ${detail}`.trim(),
         engagement_cached: t("pEngCached"),
-        rate_limit:        `${t("pRateLimit")} ${detail}`,
-        fetching:          `${t("pFetching")} ${detail}`,
-        requests:          t("pRequests"),
+        rate_limit:        `${t("pRateLimit")} ${detail}`.trim(),
+        fetching:          `${t("pFetching")} ${detail}`.trim(),
+        requests:          `${t("pRequests")} ${detail}`.trim(),
+        requests_done:     `${t("pRequests")} ✓ ${detail}`.trim(),
+        saving:            detail || t("pSaving"),
     };
 
     switch (message.type) {
         case "PROGRESS_UPDATE":
-            showStatus(LABELS[message.step] || message.step);
+            resetInactivityTimer(); // still alive — reset the inactivity clock
+            showStatus(LABELS[message.step] || message.step || (detail ? `${message.step}: ${detail}` : message.step));
             break;
+
         case "SYNC_COMPLETE":
-            btnSync.disabled = false;
-            btnForceSync.disabled = false;
+            chrome.storage.local.set({ sync_in_progress: false, sync_heartbeat: null });
+            setSyncBusy(false);
             hideStatus();
             showResults(message.stats);
-            chrome.storage.local.get(["last_run_time"], ({ last_run_time }) => {
-                if (last_run_time) {
+            showToast(currentLang === "tr" ? "Senkronizasyon tamamlandı ✓" : "Sync complete ✓", "success");
+            chrome.storage.local.get(["last_run_time"], (data) => {
+                if (data.last_run_time) {
                     lastSyncText.dataset.never = "false";
-                    lastSyncText.textContent = `${t("lastSyncPrefix")} ${new Date(last_run_time).toLocaleString(currentLang === "tr" ? "tr-TR" : "en-GB")}`;
+                    lastSyncText.textContent = `${t("lastSyncPrefix")} ${new Date(data.last_run_time).toLocaleString(currentLang === "tr" ? "tr-TR" : "en-GB")}`;
                 }
             });
             break;
+
         case "SYNC_ERROR":
-            btnSync.disabled = false;
-            btnForceSync.disabled = false;
+            chrome.storage.local.set({ sync_in_progress: false, sync_heartbeat: null });
+            setSyncBusy(false);
             showStatus(message.error || t("syncFail"), true);
+            showToast(message.error || t("syncFail"), "error");
             break;
+
+        case "DRIVE_SAVE_COMPLETE":
+            showToast(currentLang === "tr" ? "Drive'a kaydedildi ✓" : "Saved to Drive ✓", "success");
+            break;
+
+        case "DRIVE_SAVE_FAILED":
+            showToast(
+                currentLang === "tr"
+                    ? `Drive kayıt hatası: ${message.error} (Veriler korundu)`
+                    : `Drive save failed: ${message.error} (Local data preserved)`,
+                "warning"
+            );
+            break;
+
         case "STATUS_CHECKS_COMPLETE":
             bgMessage({ type: "GET_DIFF" }).then(res => { if (res.ok && res.diff) showResults(res.diff); });
             break;
@@ -288,6 +408,7 @@ chrome.runtime.onMessage.addListener((message) => {
 
 function showResults(stats) {
     currentStats = stats;
+    hideStatus(); // always clear status bar when results are displayed
 
     for (const cat of ["lost", "not_back", "new", "fans", "deactivated"]) {
         const el = document.getElementById(`count-${cat}`);
@@ -311,7 +432,10 @@ function renderList(category, stats) {
 
     const users = stats[category] || [];
     if (users.length === 0) {
-        userList.innerHTML = `<div class="empty-list">${t("noUsers")}</div>`;
+        const empty = document.createElement("div");
+        empty.className = "empty-list";
+        empty.textContent = t("noUsers");
+        userList.appendChild(empty);
         return;
     }
     for (const user of users) userList.appendChild(createUserItem(user, category));
@@ -322,57 +446,124 @@ function renderEngagementTab(summary) {
     const top   = summary.top_engagers || [];
 
     if (ghost === 0 && top.length === 0) {
-        userList.innerHTML = `<div class="empty-list">${t("engEmpty")}</div>`;
+        const empty = document.createElement("div");
+        empty.className = "empty-list";
+        empty.textContent = t("engEmpty");
+        userList.appendChild(empty);
         return;
     }
 
-    let html = `<div class="eng-summary">
-        <span class="eng-ghost">👻 ${ghost} ${t("ghostLabel")}</span>
-    </div>`;
+    // Ghost count row
+    const ghostRow = document.createElement("div");
+    ghostRow.className = "eng-summary";
+    const ghostSpan = document.createElement("span");
+    ghostSpan.className = "eng-ghost";
+    ghostSpan.textContent = `👻 ${ghost} ${t("ghostLabel")}`;
+    ghostRow.appendChild(ghostSpan);
+    userList.appendChild(ghostRow);
 
-    if (top.length > 0) {
-        html += `<div class="eng-top-title">${t("topTitle")}</div>`;
-        for (const u of top) {
-            html += `<div class="user-item eng-top-item" onclick="openProfile('${u.username}')">
-                <div class="avatar">${(u.username || "?")[0].toUpperCase()}</div>
-                <div class="user-info">
-                    <div class="user-username">@${u.username}</div>
-                </div>
-                <span class="eng-count">♥ ${u.count}</span>
-            </div>`;
-        }
+    if (top.length === 0) return;
+
+    const title = document.createElement("div");
+    title.className = "eng-top-title";
+    title.textContent = t("topTitle");
+    userList.appendChild(title);
+
+    for (const u of top) {
+        const item = document.createElement("div");
+        item.className = "user-item eng-top-item";
+
+        const avatar = document.createElement("div");
+        avatar.className = "avatar";
+        avatar.textContent = (u.username || "?")[0].toUpperCase();
+
+        const info = document.createElement("div");
+        info.className = "user-info";
+        const uname = document.createElement("div");
+        uname.className = "user-username";
+        uname.textContent = `@${u.username}`;
+        info.appendChild(uname);
+
+        const count = document.createElement("span");
+        count.className = "eng-count";
+        count.textContent = `♥ ${u.count}`;
+
+        item.appendChild(avatar);
+        item.appendChild(info);
+        item.appendChild(count);
+
+        // Safe click — username from Drive data, but use closure to avoid injection
+        item.addEventListener("click", () => {
+            if (u.username) chrome.tabs.create({ url: `https://www.instagram.com/${encodeURIComponent(u.username)}/` });
+        });
+
+        userList.appendChild(item);
     }
-    userList.innerHTML = html;
 }
 
 function createUserItem(user, category) {
     const item = document.createElement("div");
     item.className = "user-item";
-    const username = user.username || user.pk || "?";
-    const initial  = username[0].toUpperCase();
-    const badge    = category === "deactivated"
-        ? `<span class="user-badge badge-deactivated">${t("frozenBadge")}</span>` : "";
-    const verified = user.is_verified ? `<span class="verified-dot" title="✓">✓</span>` : "";
 
-    let avatarContent = initial;
-    if (user.profile_pic_url) {
-        avatarContent = `<img src="${user.profile_pic_url}" referrerpolicy="no-referrer" alt="${username}" onerror="this.style.display='none';this.parentElement.textContent='${initial}'">`;
+    const username = user.username || String(user.pk || "?");
+    const initial  = username[0].toUpperCase();
+
+    // Avatar
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+
+    if (user.profile_pic_url || user.profile_pic_b64) {
+        const img = document.createElement("img");
+        img.src = user.profile_pic_b64 || user.profile_pic_url;
+        img.alt = username;
+        img.referrerPolicy = "no-referrer";
+        img.addEventListener("error", () => {
+            img.style.display = "none";
+            avatar.textContent = initial;
+        });
+        avatar.appendChild(img);
+    } else {
+        avatar.textContent = initial;
     }
 
-    item.innerHTML = `
-        <div class="avatar">${avatarContent}</div>
-        <div class="user-info">
-            <div class="user-username">@${username}${verified}</div>
-            <div class="user-fullname">${user.full_name || ""}</div>
-        </div>
-        ${badge}
-    `;
-    item.addEventListener("click", () => { if (username !== "?") chrome.tabs.create({ url: `https://www.instagram.com/${username}/` }); });
-    return item;
-}
+    // User info
+    const info = document.createElement("div");
+    info.className = "user-info";
 
-function openProfile(username) {
-    chrome.tabs.create({ url: `https://www.instagram.com/${username}/` });
+    const nameEl = document.createElement("div");
+    nameEl.className = "user-username";
+    nameEl.textContent = `@${username}`;
+
+    if (user.is_verified) {
+        const dot = document.createElement("span");
+        dot.className = "verified-dot";
+        dot.title = "✓";
+        dot.textContent = "✓";
+        nameEl.appendChild(dot);
+    }
+
+    const fullEl = document.createElement("div");
+    fullEl.className = "user-fullname";
+    fullEl.textContent = user.full_name || "";
+
+    info.appendChild(nameEl);
+    info.appendChild(fullEl);
+
+    item.appendChild(avatar);
+    item.appendChild(info);
+
+    if (category === "deactivated") {
+        const badge = document.createElement("span");
+        badge.className = "user-badge badge-deactivated";
+        badge.textContent = t("frozenBadge");
+        item.appendChild(badge);
+    }
+
+    item.addEventListener("click", () => {
+        if (username !== "?") chrome.tabs.create({ url: `https://www.instagram.com/${encodeURIComponent(username)}/` });
+    });
+
+    return item;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
