@@ -63,6 +63,10 @@ const translations = {
         requestsNote: "Seni takip etmek isteyen ancak henüz onaylamadığın hesaplar",
         withdrawnNote: "Daha önce istek gönderip geri çeken hesaplar",
 
+        // Chart
+        chartNoData: "Grafik için yeterli veri yok. Trendleri görmek için en az iki kez senkronize edin.",
+        chartTitle: "Takipçi Geçmişi",
+
         // UserCard / Engagement breakdown
         verifiedTitle: "Onaylı Hesap",
         interactionsTitle: "Etkileşim puanı",
@@ -131,6 +135,10 @@ const translations = {
         noWithdrawn: "No withdrawn requests.",
         requestsNote: "Accounts that requested to follow you but you haven't approved yet",
         withdrawnNote: "Accounts that sent a follow request and then withdrew it",
+
+        // Chart
+        chartNoData: "Not enough data for chart yet. Sync at least twice to see trends.",
+        chartTitle: "Follower History",
 
         // UserCard / Engagement breakdown
         verifiedTitle: "Verified Account",

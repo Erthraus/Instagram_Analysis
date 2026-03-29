@@ -22,9 +22,13 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
     const stats      = snapshot?.stats      || {};
     const history    = snapshot?.history    || [];
     const engagement = snapshot?.engagement || {};
-    const followers  = snapshot?.followers  || [];
     const fullMap    = snapshot?.full_map   || {};
     const requests   = snapshot?.requests   || {};
+
+    // Reconstruct followers/following from full_map if arrays are absent (new snapshot format).
+    // Old format had explicit arrays; new format uses is_follower/is_following flags in full_map.
+    const followers  = snapshot?.followers  || Object.values(fullMap).filter(u => u.is_follower);
+    const following  = snapshot?.following  || Object.values(fullMap).filter(u => u.is_following);
 
     // Enrich stat arrays with full_map data (profile_pic, is_verified)
     function enrich(pks) {

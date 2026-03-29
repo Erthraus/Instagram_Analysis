@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { useLanguage } from "../i18n/index.js";
 
 export function UserCard({ user, badge, engagementCount }) {
     const [picFailed, setPicFailed] = useState(false);
+    const { t } = useLanguage();
     const initial = (user.username || "?")[0].toUpperCase();
 
     // Prefer base64-cached version (never expires) over raw CDN URL (expires 24-48h)
@@ -23,13 +25,13 @@ export function UserCard({ user, badge, engagementCount }) {
             <div className="user-info">
                 <span className="user-username">
                     @{user.username}
-                    {user.is_verified && <span className="verified-badge" title="Verified">✓</span>}
+                    {user.is_verified && <span className="verified-badge" title={t("verifiedTitle")}>✓</span>}
                 </span>
                 {user.full_name && <span className="user-fullname">{user.full_name}</span>}
             </div>
 
             {engagementCount !== undefined && (
-                <span className="engagement-count" title="Interactions on last 9 posts">
+                <span className="engagement-count" title={t("interactionsTitle")}>
                     {engagementCount > 0 ? `♥ ${engagementCount}` : "👻"}
                 </span>
             )}

@@ -442,10 +442,11 @@ function renderList(category, stats) {
 }
 
 function renderEngagementTab(summary) {
-    const ghost = summary.ghost_count ?? 0;
-    const top   = summary.top_engagers || [];
+    const ghost    = summary.ghost_count ?? 0;
+    const engagers = summary.engagers || [];
+    const weights  = summary.weights || { post_likes: 2, story_views: 1, story_likes: 3 };
 
-    if (ghost === 0 && top.length === 0) {
+    if (ghost === 0 && engagers.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-list";
         empty.textContent = t("engEmpty");
@@ -453,51 +454,115 @@ function renderEngagementTab(summary) {
         return;
     }
 
-    // Ghost count row
-    const ghostRow = document.createElement("div");
-    ghostRow.className = "eng-summary";
-    const ghostSpan = document.createElement("span");
-    ghostSpan.className = "eng-ghost";
-    ghostSpan.textContent = `👻 ${ghost} ${t("ghostLabel")}`;
-    ghostRow.appendChild(ghostSpan);
-    userList.appendChild(ghostRow);
+    // ── Summary stats ────────────────────────────────────────────────────────
+    const totals = engagers.reduce((acc, u) => {
+        acc.post_likes  += u.post_likes  || 0;
+        acc.story_views += u.story_views || 0;
+        acc.story_likes += u.story_likes || 0;
+        return acc;
+    }, { post_likes: 0, story_views: 0, story_likes: 0 });
 
-    if (top.length === 0) return;
+    const summaryBox = document.createElement("div");
+    summaryBox.className = "eng-stats-box";
 
-    const title = document.createElement("div");
-    title.className = "eng-top-title";
-    title.textContent = t("topTitle");
-    userList.appendChild(title);
+    const statsRow = document.createElement("div");
+    statsRow.className = "eng-stats-row";
+    const statItems = [
+        { label: currentLang === "tr" ? "Beğeni"       : "Post Likes",   value: totals.post_likes,  cls: "eng-stat-likes",  icon: "♥" },
+        { label: currentLang === "tr" ? "Görüntüleme"   : "Story Views",  value: totals.story_views, cls: "eng-stat-views",  icon: "◉" },
+        { label: currentLang === "tr" ? "Hik. Beğeni"  : "Story Likes",  value: totals.story_likes, cls: "eng-stat-slikes", icon: "★" },
+        { label: currentLang === "tr" ? "Hayalet"       : "Ghosts",       value: ghost,              cls: "eng-stat-ghost",  icon: "👻" },
+    ];
+    for (const s of statItems) {
+        const stat = document.createElement("div");
+        stat.className = `eng-stat ${s.cls}`;
+        const val = document.createElement("div");
+        val.className = "eng-stat-value";
+        val.textContent = `${s.icon} ${s.value}`;
+        const lbl = document.createElement("div");
+        lbl.className = "eng-stat-label";
+        lbl.textContent = s.label;
+        stat.appendChild(val);
+        stat.appendChild(lbl);
+        statsRow.appendChild(stat);
+    }
+    summaryBox.appendChild(statsRow);
 
-    for (const u of top) {
-        const item = document.createElement("div");
-        item.className = "user-item eng-top-item";
+    // Weights legend
+    const legend = document.createElement("div");
+    legend.className = "eng-weights";
+    legend.textContent = currentLang === "tr"
+        ? `Skor = Beğeni×${weights.post_likes} + Görüntüleme×${weights.story_views} + Hik.Beğeni×${weights.story_likes}`
+        : `Score = Likes×${weights.post_likes} + Views×${weights.story_views} + S.Likes×${weights.story_likes}`;
+    summaryBox.appendChild(legend);
 
-        const avatar = document.createElement("div");
-        avatar.className = "avatar";
-        avatar.textContent = (u.username || "?")[0].toUpperCase();
+    userList.appendChild(summaryBox);
 
-        const info = document.createElement("div");
-        info.className = "user-info";
-        const uname = document.createElement("div");
-        uname.className = "user-username";
-        uname.textContent = `@${u.username}`;
-        info.appendChild(uname);
+    if (engagers.length === 0) return;
 
-        const count = document.createElement("span");
-        count.className = "eng-count";
-        count.textContent = `♥ ${u.count}`;
+    // ── Table header ─────────────────────────────────────────────────────────
+    const header = document.createElement("div");
+    header.className = "eng-row eng-header";
+    const cols = [
+        { text: "#",                                    cls: "eng-col-rank" },
+        { text: currentLang === "tr" ? "Kullanıcı" : "User", cls: "eng-col-user" },
+        { text: "♥",                                    cls: "eng-col-num", title: currentLang === "tr" ? "Gönderi Beğeni" : "Post Likes" },
+        { text: "◉",                                    cls: "eng-col-num", title: currentLang === "tr" ? "Hikaye Görüntüleme" : "Story Views" },
+        { text: "★",                                    cls: "eng-col-num", title: currentLang === "tr" ? "Hikaye Beğeni" : "Story Likes" },
+        { text: currentLang === "tr" ? "Skor" : "Score", cls: "eng-col-score" },
+    ];
+    for (const col of cols) {
+        const cell = document.createElement("div");
+        cell.className = col.cls;
+        cell.textContent = col.text;
+        if (col.title) cell.title = col.title;
+        header.appendChild(cell);
+    }
+    userList.appendChild(header);
 
-        item.appendChild(avatar);
-        item.appendChild(info);
-        item.appendChild(count);
+    // ── Engager rows ─────────────────────────────────────────────────────────
+    for (let i = 0; i < engagers.length; i++) {
+        const u = engagers[i];
+        const row = document.createElement("div");
+        row.className = "eng-row eng-data-row";
 
-        // Safe click — username from Drive data, but use closure to avoid injection
-        item.addEventListener("click", () => {
+        const rank = document.createElement("div");
+        rank.className = "eng-col-rank";
+        rank.textContent = i + 1;
+
+        const user = document.createElement("div");
+        user.className = "eng-col-user";
+        user.textContent = `@${u.username}`;
+        user.title = u.username;
+
+        const likes = document.createElement("div");
+        likes.className = "eng-col-num eng-val-likes";
+        likes.textContent = u.post_likes || 0;
+
+        const views = document.createElement("div");
+        views.className = "eng-col-num eng-val-views";
+        views.textContent = u.story_views || 0;
+
+        const slikes = document.createElement("div");
+        slikes.className = "eng-col-num eng-val-slikes";
+        slikes.textContent = u.story_likes || 0;
+
+        const score = document.createElement("div");
+        score.className = "eng-col-score";
+        score.textContent = u.score || 0;
+
+        row.appendChild(rank);
+        row.appendChild(user);
+        row.appendChild(likes);
+        row.appendChild(views);
+        row.appendChild(slikes);
+        row.appendChild(score);
+
+        row.addEventListener("click", () => {
             if (u.username) chrome.tabs.create({ url: `https://www.instagram.com/${encodeURIComponent(u.username)}/` });
         });
 
-        userList.appendChild(item);
+        userList.appendChild(row);
     }
 }
 

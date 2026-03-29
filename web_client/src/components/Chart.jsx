@@ -2,16 +2,19 @@ import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
     ResponsiveContainer
 } from "recharts";
+import { useLanguage } from "../i18n/index.js";
 
 /**
  * Chart — follower count history line chart using recharts.
  * Requires snapshot.history = [{ timestamp, follower_count }, ...]
  */
 export function Chart({ history = [] }) {
+    const { t } = useLanguage();
+
     if (history.length < 2) {
         return (
             <div className="chart-placeholder">
-                Not enough data for chart yet. Sync at least twice to see trends.
+                {t("chartNoData")}
             </div>
         );
     }
@@ -23,7 +26,7 @@ export function Chart({ history = [] }) {
 
     return (
         <div className="chart-container">
-            <h3 className="chart-title">Follower History</h3>
+            <h3 className="chart-title">{t("chartTitle")}</h3>
             <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={data} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#2a2a2a" />

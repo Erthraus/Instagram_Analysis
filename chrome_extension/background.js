@@ -345,16 +345,30 @@ async function handleAnalysisComplete(newSnapshot) {
         for (const user of (list || [])) enrichUser(user);
     }
 
-    // Engagement summary for popup display
+    // Engagement summary — full per-user breakdown for popup display
     const eng = snapshotToSave.engagement || {};
-    const getScore = (v) => (v && typeof v === "object") ? (v.score ?? 0) : (v ?? 0);
+    const getEng = (pk) => {
+        const v = eng[pk];
+        if (v && typeof v === "object") return v;
+        return { post_likes: 0, story_views: 0, story_likes: 0, score: typeof v === "number" ? v : 0 };
+    };
     const engagementSummary = {
-        ghost_count:  newSnapshot.followers.filter(u => getScore(eng[u.pk]) === 0).length,
-        top_engagers: newSnapshot.followers
-            .filter(u => getScore(eng[u.pk]) > 0)
-            .sort((a, b) => getScore(eng[b.pk]) - getScore(eng[a.pk]))
-            .slice(0, 5)
-            .map(u => ({ pk: u.pk, username: u.username, count: getScore(eng[u.pk]) }))
+        ghost_count: newSnapshot.followers.filter(u => getEng(u.pk).score === 0).length,
+        weights: { post_likes: 2, story_views: 1, story_likes: 3 },
+        engagers: newSnapshot.followers
+            .filter(u => getEng(u.pk).score > 0)
+            .sort((a, b) => getEng(b.pk).score - getEng(a.pk).score)
+            .map(u => {
+                const e = getEng(u.pk);
+                return {
+                    pk: u.pk,
+                    username: u.username,
+                    post_likes:  e.post_likes  || 0,
+                    story_views: e.story_views || 0,
+                    story_likes: e.story_likes || 0,
+                    score:       e.score       || 0
+                };
+            })
     };
 
     const diffResult = {

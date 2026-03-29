@@ -258,7 +258,7 @@ async function fetchStoryViewers(storyPk, csrfToken) {
 // ── Etkileşim: hepsini birleştir ──────────────────────────────────────────────
 //
 // engagement[pk] = { post_likes: N, story_views: N, story_likes: N, score: N }
-// Skor = post_likes×1 + story_views×1 + story_likes×2
+// Skor = post_likes×2 + story_views×1 + story_likes×3
 
 async function fetchAllEngagement(userId, csrfToken) {
     const engagement = {};
@@ -295,9 +295,10 @@ async function fetchAllEngagement(userId, csrfToken) {
         }
     } catch { /* hikaye fetch başarısız */ }
 
-    // Skorları hesapla
+    // Ağırlıklı skor hesapla
+    // Post beğeni ×2 (aktif etkileşim), Hikaye görüntüleme ×1 (pasif), Hikaye beğeni ×3 (en bilinçli)
     for (const e of Object.values(engagement)) {
-        e.score = e.post_likes + e.story_views + e.story_likes * 2;
+        e.score = e.post_likes * 2 + e.story_views * 1 + e.story_likes * 3;
     }
 
     return engagement;

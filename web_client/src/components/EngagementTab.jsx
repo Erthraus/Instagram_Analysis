@@ -31,6 +31,7 @@ function EngagementBreakdown({ eng }) {
 }
 
 function UserRow({ user, eng }) {
+    const { t } = useLanguage();
     const initial = (user.username || "?")[0].toUpperCase();
     const picSrc  = user.profile_pic_b64 || user.profile_pic_url;
     return (
@@ -43,7 +44,7 @@ function UserRow({ user, eng }) {
             <div className="eng-user-info">
                 <div className="eng-username">
                     @{user.username}
-                    {user.is_verified && <span className="verified-badge" title="Onaylı">✓</span>}
+                    {user.is_verified && <span className="verified-badge" title={t("verifiedTitle")}>✓</span>}
                 </div>
                 {user.full_name && <div className="eng-fullname">{user.full_name}</div>}
             </div>
