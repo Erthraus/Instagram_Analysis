@@ -324,6 +324,27 @@ async function handleAnalysisComplete(newSnapshot) {
         }
     }
 
+    // Enrich stats/requests arrays with base64 pics + latest data from fullMap.
+    // Without this, popup only has CDN URLs which don't load from extension context.
+    const enrichUser = (user) => {
+        const entry = fullMap[String(user.pk)];
+        if (entry) {
+            if (entry.profile_pic_b64)  user.profile_pic_b64 = entry.profile_pic_b64;
+            if (entry.profile_pic_url)  user.profile_pic_url = entry.profile_pic_url;
+        }
+    };
+    for (const list of [
+        snapshotToSave.stats.lost,
+        snapshotToSave.stats.new,
+        snapshotToSave.stats.not_back,
+        snapshotToSave.stats.fans,
+        snapshotToSave.stats.deactivated,
+        snapshotToSave.requests.pending,
+        snapshotToSave.requests.withdrawn,
+    ]) {
+        for (const user of (list || [])) enrichUser(user);
+    }
+
     // Engagement summary for popup display
     const eng = snapshotToSave.engagement || {};
     const getScore = (v) => (v && typeof v === "object") ? (v.score ?? 0) : (v ?? 0);
