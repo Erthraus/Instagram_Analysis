@@ -1,8 +1,38 @@
-import { useEffect } from "react";
+import { useEffect, Component } from "react";
 import { useGoogleAuth } from "./hooks/useGoogleAuth.js";
 import { useDriveData } from "./hooks/useDriveData.js";
 import { Dashboard } from "./components/Dashboard.jsx";
 import { useLanguage } from "./i18n/index.js";
+
+// ── Error Boundary ───────────────────────────────────────────────────────────
+
+class ErrorBoundary extends Component {
+    state = { hasError: false, error: null };
+
+    static getDerivedStateFromError(error) {
+        return { hasError: true, error };
+    }
+
+    render() {
+        if (this.state.hasError) {
+            return (
+                <div className="screen-center">
+                    <div className="error-card">
+                        <div className="error-icon">⚠️</div>
+                        <p>{this.props.fallbackTitle || "Something went wrong"}</p>
+                        <p className="error-msg">{this.state.error?.message}</p>
+                        <button className="btn-primary" onClick={() => window.location.reload()}>
+                            {this.props.reloadLabel || "Reload"}
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
+
+// ── Lang Toggle ──────────────────────────────────────────────────────────────
 
 function LangToggle() {
     const { lang, toggle } = useLanguage();
@@ -13,9 +43,11 @@ function LangToggle() {
     );
 }
 
-export default function App() {
+// ── App ──────────────────────────────────────────────────────────────────────
+
+function AppContent() {
     const { token, error: authError, login, logout } = useGoogleAuth();
-    const { snapshot, modifiedTime, accounts, selectedId, loading, error: driveError, refresh, switchAccount } = useDriveData(token);
+    const { snapshot, modifiedTime, accounts, selectedId, loading, error: driveError, refresh, switchAccount, deleteAccount } = useDriveData(token);
     const { t } = useLanguage();
 
     // Auto-logout when Drive token is expired or invalid (401)
@@ -99,8 +131,18 @@ export default function App() {
             accounts={accounts}
             selectedId={selectedId}
             onSwitchAccount={switchAccount}
+            onDeleteAccount={deleteAccount}
             onLogout={logout}
             onRefresh={refresh}
         />
+    );
+}
+
+export default function App() {
+    const { t } = useLanguage();
+    return (
+        <ErrorBoundary fallbackTitle={t("errorOccurred")} reloadLabel={t("errorReload")}>
+            <AppContent />
+        </ErrorBoundary>
     );
 }

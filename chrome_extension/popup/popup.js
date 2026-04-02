@@ -532,8 +532,27 @@ function renderEngagementTab(summary) {
 
         const user = document.createElement("div");
         user.className = "eng-col-user";
-        user.textContent = `@${u.username}`;
-        user.title = u.username;
+        // Avatar
+        const avatar = document.createElement("div");
+        avatar.className = "eng-avatar-sm";
+        const picSrc = u.profile_pic_b64 || u.profile_pic_url;
+        if (picSrc) {
+            const img = document.createElement("img");
+            img.src = picSrc;
+            img.alt = u.username;
+            img.referrerPolicy = "no-referrer";
+            img.addEventListener("error", () => { img.style.display = "none"; avatar.textContent = (u.username || "?")[0].toUpperCase(); });
+            avatar.appendChild(img);
+        } else {
+            avatar.textContent = (u.username || "?")[0].toUpperCase();
+        }
+        user.appendChild(avatar);
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "eng-col-username";
+        nameSpan.textContent = `@${u.username}`;
+        if (u.is_verified) { const v = document.createElement("span"); v.className = "verified-dot"; v.textContent = "✓"; nameSpan.appendChild(v); }
+        user.appendChild(nameSpan);
+        user.title = u.full_name || u.username;
 
         const likes = document.createElement("div");
         likes.className = "eng-col-num eng-val-likes";

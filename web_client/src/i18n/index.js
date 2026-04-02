@@ -66,6 +66,23 @@ const translations = {
         // Chart
         chartNoData: "Grafik için yeterli veri yok. Trendleri görmek için en az iki kez senkronize edin.",
         chartTitle: "Takipçi Geçmişi",
+        chartFollowers: "Takipçiler",
+        chartFollowing: "Takip Edilenler",
+
+        // Export
+        exportBtn: "Dışa Aktar",
+
+        // Error Boundary
+        errorOccurred: "Bir hata oluştu",
+        errorReload: "Sayfayı Yenile",
+
+        // Delete Account
+        deleteAccount: "Hesabı Sil",
+        deleteAccountTip: "Bu hesabın verilerini Google Drive'dan sil",
+        deleteConfirmTitle: "Hesap Verisini Sil",
+        deleteConfirmDesc: "{account} hesabına ait tüm analiz verileri Google Drive'dan kalıcı olarak silinecek.",
+        deleteCancel: "Vazgeç",
+        deleteConfirm: "Sil",
 
         // UserCard / Engagement breakdown
         verifiedTitle: "Onaylı Hesap",
@@ -139,6 +156,23 @@ const translations = {
         // Chart
         chartNoData: "Not enough data for chart yet. Sync at least twice to see trends.",
         chartTitle: "Follower History",
+        chartFollowers: "Followers",
+        chartFollowing: "Following",
+
+        // Export
+        exportBtn: "Export",
+
+        // Error Boundary
+        errorOccurred: "Something went wrong",
+        errorReload: "Reload Page",
+
+        // Delete Account
+        deleteAccount: "Delete",
+        deleteAccountTip: "Delete this account's data from Google Drive",
+        deleteConfirmTitle: "Delete Account Data",
+        deleteConfirmDesc: "All analytics data for {account} will be permanently deleted from Google Drive.",
+        deleteCancel: "Cancel",
+        deleteConfirm: "Delete",
 
         // UserCard / Engagement breakdown
         verifiedTitle: "Verified Account",

@@ -1,12 +1,12 @@
 import {
-    LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+    LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
     ResponsiveContainer
 } from "recharts";
 import { useLanguage } from "../i18n/index.js";
 
 /**
- * Chart — follower count history line chart using recharts.
- * Requires snapshot.history = [{ timestamp, follower_count }, ...]
+ * Chart — follower + following count history line chart using recharts.
+ * Requires snapshot.history = [{ timestamp, follower_count, following_count? }, ...]
  */
 export function Chart({ history = [] }) {
     const { t } = useLanguage();
@@ -19,9 +19,14 @@ export function Chart({ history = [] }) {
         );
     }
 
+    const hasFollowing = history.some(e => e.following_count != null);
+
     const data = history.map(entry => ({
         date: new Date(entry.timestamp).toLocaleDateString(),
-        followers: entry.follower_count
+        [t("chartFollowers")]: entry.follower_count,
+        ...(hasFollowing && entry.following_count != null
+            ? { [t("chartFollowing")]: entry.following_count }
+            : {}),
     }));
 
     return (
@@ -39,7 +44,7 @@ export function Chart({ history = [] }) {
                         tick={{ fill: "#888", fontSize: 11 }}
                         tickLine={false}
                         axisLine={false}
-                        width={45}
+                        width={50}
                     />
                     <Tooltip
                         contentStyle={{
@@ -49,14 +54,26 @@ export function Chart({ history = [] }) {
                             color: "#e0e0e0"
                         }}
                     />
+                    {hasFollowing && <Legend wrapperStyle={{ fontSize: 11, color: "#888" }} />}
                     <Line
                         type="monotone"
-                        dataKey="followers"
+                        dataKey={t("chartFollowers")}
                         stroke="#0095f6"
                         strokeWidth={2}
                         dot={false}
                         activeDot={{ r: 4, fill: "#0095f6" }}
                     />
+                    {hasFollowing && (
+                        <Line
+                            type="monotone"
+                            dataKey={t("chartFollowing")}
+                            stroke="#da77f2"
+                            strokeWidth={2}
+                            dot={false}
+                            activeDot={{ r: 4, fill: "#da77f2" }}
+                            strokeDasharray="5 3"
+                        />
+                    )}
                 </LineChart>
             </ResponsiveContainer>
         </div>

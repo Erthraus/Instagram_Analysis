@@ -10,7 +10,7 @@ export function UserCard({ user, badge, engagementCount }) {
     const picSrc = user.profile_pic_b64 || user.profile_pic_url;
 
     return (
-        <div className="user-card" onClick={() => window.open(`https://www.instagram.com/${user.username}/`, "_blank")}>
+        <div className="user-card" onClick={() => window.open(`https://www.instagram.com/${encodeURIComponent(user.username)}/`, "_blank")}>
             <div className="user-avatar">
                 {picSrc && !picFailed ? (
                     <img

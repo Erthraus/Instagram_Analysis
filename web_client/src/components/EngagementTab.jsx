@@ -35,7 +35,7 @@ function UserRow({ user, eng }) {
     const initial = (user.username || "?")[0].toUpperCase();
     const picSrc  = user.profile_pic_b64 || user.profile_pic_url;
     return (
-        <div className="eng-user-row" onClick={() => window.open(`https://www.instagram.com/${user.username}/`, "_blank")}>
+        <div className="eng-user-row" onClick={() => window.open(`https://www.instagram.com/${encodeURIComponent(user.username)}/`, "_blank")}>
             <div className="eng-avatar">
                 {picSrc
                     ? <img src={picSrc} referrerPolicy="no-referrer" alt={user.username} onError={e => { e.target.style.display = "none"; e.target.parentElement.textContent = initial; }} />

@@ -4,6 +4,9 @@
  *
  * Hesap ayrımı: Her Instagram hesabı kendi dosyasına kaydedilir.
  * Dosya adı: Analytics_Snapshot_{userId}.json
+ *
+ * Compression: Snapshots are gzip-compressed (v2 format) before upload.
+ * Old uncompressed snapshots (v1) are transparently decompressed on read.
  */
 
 const DRIVE_BASE       = "https://www.googleapis.com/drive/v3";
@@ -58,6 +61,45 @@ async function safeJson(res) {
     return res.json();
 }
 
+// ── Compression (gzip via CompressionStream) ────────────────────────────────
+// v2 format: { v: 2, gz: "<base64-gzipped-json>" }
+// Falls back to uncompressed if CompressionStream is unavailable.
+
+async function compressSnapshot(snapshot) {
+    try {
+        const json = JSON.stringify(snapshot);
+        const blob = new Blob([json]);
+        const cs = new CompressionStream("gzip");
+        const compressed = blob.stream().pipeThrough(cs);
+        const buffer = await new Response(compressed).arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 8192) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        }
+        return { v: 2, gz: btoa(binary) };
+    } catch {
+        // Fallback: save uncompressed
+        return snapshot;
+    }
+}
+
+async function decompressSnapshot(data) {
+    if (data && data.v === 2 && data.gz) {
+        const binary = atob(data.gz);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const blob = new Blob([bytes]);
+        const ds = new DecompressionStream("gzip");
+        const decompressed = blob.stream().pipeThrough(ds);
+        const text = await new Response(decompressed).text();
+        return JSON.parse(text);
+    }
+    return data;
+}
+
+// ── Drive Operations ────────────────────────────────────────────────────────
+
 async function findFileId(token, userId) {
     const name = getFileName(userId);
     const url = `${DRIVE_BASE}/files?spaces=appDataFolder&q=name%3D'${encodeURIComponent(name)}'&fields=files(id)`;
@@ -83,7 +125,7 @@ function buildMultipart(boundary, metadata, content) {
 
 /**
  * Save (upsert) a snapshot to Drive — uses userId-specific filename.
- * Prevents different accounts from overwriting each other.
+ * Compresses with gzip before upload to reduce Drive storage usage.
  */
 export async function saveSnapshot(snapshot) {
     const userId = snapshot.userId;
@@ -98,7 +140,8 @@ export async function saveSnapshot(snapshot) {
         ? { name: fileName }
         : { name: fileName, parents: ["appDataFolder"] };
 
-    const body = buildMultipart(boundary, metadata, snapshot);
+    const compressed = await compressSnapshot(snapshot);
+    const body = buildMultipart(boundary, metadata, compressed);
 
     const url = existingId
         ? `${UPLOAD_BASE}/files/${existingId}?uploadType=multipart`
@@ -119,6 +162,7 @@ export async function saveSnapshot(snapshot) {
 
 /**
  * Load a snapshot by userId. Returns null if no file exists for this user.
+ * Transparently decompresses v2 (gzipped) snapshots.
  */
 export async function loadSnapshot(userId) {
     const token  = await getToken();
@@ -129,7 +173,8 @@ export async function loadSnapshot(userId) {
         headers: { Authorization: `Bearer ${token}` }
     });
     if (!res.ok) throwDriveError(res.status, "load");
-    return safeJson(res);
+    const raw = await safeJson(res);
+    return decompressSnapshot(raw);
 }
 
 /**
@@ -152,11 +197,13 @@ export async function listSnapshots(token) {
 
 /**
  * Load a snapshot by Drive file ID (used by account switcher).
+ * Transparently decompresses v2 (gzipped) snapshots.
  */
 export async function loadSnapshotById(token, fileId) {
     const res = await fetchWithTimeout(`${DRIVE_BASE}/files/${fileId}?alt=media`, {
         headers: { Authorization: `Bearer ${token}` }
     });
     if (!res.ok) throwDriveError(res.status, "load-by-id");
-    return safeJson(res);
+    const raw = await safeJson(res);
+    return decompressSnapshot(raw);
 }

@@ -281,7 +281,10 @@ async function handleAnalysisComplete(newSnapshot) {
         userId:      newSnapshot.userId,
         currentUser: newSnapshot.currentUser || null,
         full_map:    fullMap,
-        history:     buildHistory(driveSnapshot, newSnapshot.followers.length),
+        history:     buildHistory(driveSnapshot, {
+            follower_count:  newSnapshot.followers.length,
+            following_count: newSnapshot.following.length,
+        }),
         engagement:  newSnapshot.engagement || {},
         requests: {
             pending:   newSnapshot.requests?.pending   || [],
@@ -297,20 +300,17 @@ async function handleAnalysisComplete(newSnapshot) {
         }
     };
 
-    // Fetch profile pics as base64 — ONLY for users visible in the UI (diff lists).
-    const relevantPks = new Set([
-        ...snapshotToSave.stats.lost.map(u => String(u.pk)),
-        ...(snapshotToSave.stats.new        || []).map(u => String(u.pk)),
-        ...snapshotToSave.stats.fans.map(u => String(u.pk)),
-        ...snapshotToSave.stats.not_back.map(u => String(u.pk)),
-        ...snapshotToSave.stats.deactivated.map(u => String(u.pk)),
-        ...(snapshotToSave.requests.pending  || []).map(u => String(u.pk || u)),
-        ...(snapshotToSave.requests.withdrawn || []).map(u => String(u.pk || u)),
-    ]);
+    // Fetch ALL profile pics as base64 — previously cached pics are skipped.
+    const eng = snapshotToSave.engagement || {};
+    const getEng = (pk) => {
+        const v = eng[pk];
+        if (v && typeof v === "object") return v;
+        return { post_likes: 0, story_views: 0, story_likes: 0, score: typeof v === "number" ? v : 0 };
+    };
 
-    const picsToFetch = [...relevantPks]
-        .filter(pk => fullMap[pk]?.profile_pic_url && !fullMap[pk]?.profile_pic_b64)
-        .slice(0, 60);
+    const allUserPks = Object.keys(fullMap);
+    const picsToFetch = allUserPks
+        .filter(pk => fullMap[pk]?.profile_pic_url && !fullMap[pk]?.profile_pic_b64);
 
     if (picsToFetch.length > 0) {
         sendProgress(`Profil resimleri yükleniyor... (0/${picsToFetch.length})`);
@@ -345,13 +345,7 @@ async function handleAnalysisComplete(newSnapshot) {
         for (const user of (list || [])) enrichUser(user);
     }
 
-    // Engagement summary — full per-user breakdown for popup display
-    const eng = snapshotToSave.engagement || {};
-    const getEng = (pk) => {
-        const v = eng[pk];
-        if (v && typeof v === "object") return v;
-        return { post_likes: 0, story_views: 0, story_likes: 0, score: typeof v === "number" ? v : 0 };
-    };
+    // Engagement summary — full per-user breakdown for popup display (with pics)
     const engagementSummary = {
         ghost_count: newSnapshot.followers.filter(u => getEng(u.pk).score === 0).length,
         weights: { post_likes: 2, story_views: 1, story_likes: 3 },
@@ -360,9 +354,14 @@ async function handleAnalysisComplete(newSnapshot) {
             .sort((a, b) => getEng(b.pk).score - getEng(a.pk).score)
             .map(u => {
                 const e = getEng(u.pk);
+                const fm = fullMap[String(u.pk)];
                 return {
                     pk: u.pk,
                     username: u.username,
+                    full_name: u.full_name || "",
+                    profile_pic_url: fm?.profile_pic_url || u.profile_pic_url || null,
+                    profile_pic_b64: fm?.profile_pic_b64 || null,
+                    is_verified: u.is_verified || false,
                     post_likes:  e.post_likes  || 0,
                     story_views: e.story_views || 0,
                     story_likes: e.story_likes || 0,
@@ -516,13 +515,13 @@ async function runDeactivatedStatusChecks() {
 
 // ── History Builder ───────────────────────────────────────────────────────────
 
-function buildHistory(previousSnapshot, currentFollowerCount) {
-    if (typeof currentFollowerCount !== "number") return previousSnapshot?.history || [];
+function buildHistory(previousSnapshot, counts) {
+    if (typeof counts === "number") counts = { follower_count: counts };
+    if (!counts?.follower_count) return previousSnapshot?.history || [];
     const previous = previousSnapshot?.history || [];
-    return [
-        ...previous.slice(-29),
-        { timestamp: new Date().toISOString(), follower_count: currentFollowerCount }
-    ];
+    const entry = { timestamp: new Date().toISOString(), follower_count: counts.follower_count };
+    if (counts.following_count != null) entry.following_count = counts.following_count;
+    return [...previous.slice(-29), entry];
 }
 
 // ── Drive Error Translator ────────────────────────────────────────────────────

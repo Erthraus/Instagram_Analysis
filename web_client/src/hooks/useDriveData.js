@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
-import { listSnapshots, loadSnapshotById } from "../utils/driveApi.js";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { listSnapshots, loadSnapshotById, deleteSnapshot } from "../utils/driveApi.js";
+
+const REFRESH_COOLDOWN_MS = 5000; // 5 seconds between refreshes
 
 /**
  * useDriveData — Fetches Analytics_Snapshot_{userId}.json from Drive.
- * Supports multiple Instagram accounts via account switching.
+ * Supports multiple Instagram accounts via account switching and deletion.
  */
 export function useDriveData(token) {
     const [accounts, setAccounts]       = useState([]); // [{ id, userId, modifiedTime, currentUser }]
@@ -13,6 +15,7 @@ export function useDriveData(token) {
     const [loading, setLoading]         = useState(false);
     const [error, setError]             = useState(null);
     const [refreshKey, setRefreshKey]   = useState(0);
+    const lastRefreshAt                 = useRef(0);
 
     useEffect(() => {
         if (!token) return;
@@ -50,7 +53,12 @@ export function useDriveData(token) {
 
     }, [token, refreshKey]); // intentionally exclude selectedId — handled by switchAccount
 
-    const refresh = () => setRefreshKey(k => k + 1);
+    const refresh = useCallback(() => {
+        const now = Date.now();
+        if (now - lastRefreshAt.current < REFRESH_COOLDOWN_MS) return;
+        lastRefreshAt.current = now;
+        setRefreshKey(k => k + 1);
+    }, []);
 
     const switchAccount = useCallback(async (fileId) => {
         if (!token || fileId === selectedId) return;
@@ -62,7 +70,6 @@ export function useDriveData(token) {
             setSelectedId(fileId);
             setSnapshot(data);
             setModifiedTime(file?.modifiedTime || null);
-            // Update username in accounts list now that we have the snapshot
             setAccounts(prev => prev.map(f =>
                 f.id === fileId
                     ? { ...f, username: data.currentUser?.username || f.userId }
@@ -75,5 +82,38 @@ export function useDriveData(token) {
         }
     }, [token, selectedId, accounts]);
 
-    return { snapshot, modifiedTime, accounts, selectedId, loading, error, refresh, switchAccount };
+    const deleteAccount = useCallback(async (fileId) => {
+        if (!token || !fileId) return;
+        setLoading(true);
+        setError(null);
+        try {
+            await deleteSnapshot(token, fileId);
+            const remaining = accounts.filter(f => f.id !== fileId);
+            setAccounts(remaining);
+
+            if (remaining.length === 0) {
+                setSelectedId(null);
+                setSnapshot(null);
+                setModifiedTime(null);
+            } else if (fileId === selectedId) {
+                // Deleted the currently viewed account — switch to first remaining
+                const next = remaining[0];
+                const data = await loadSnapshotById(token, next.id);
+                setSelectedId(next.id);
+                setSnapshot(data);
+                setModifiedTime(next.modifiedTime || null);
+                setAccounts(prev => prev.map(f =>
+                    f.id === next.id
+                        ? { ...f, username: data.currentUser?.username || f.userId }
+                        : f
+                ));
+            }
+        } catch (err) {
+            setError(err.message || "Silme başarısız.");
+        } finally {
+            setLoading(false);
+        }
+    }, [token, selectedId, accounts]);
+
+    return { snapshot, modifiedTime, accounts, selectedId, loading, error, refresh, switchAccount, deleteAccount };
 }

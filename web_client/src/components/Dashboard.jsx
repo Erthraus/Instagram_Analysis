@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { CategoryList } from "./CategoryList.jsx";
 import { EngagementTab } from "./EngagementTab.jsx";
 import { RequestsTab } from "./RequestsTab.jsx";
 import { Chart } from "./Chart.jsx";
 import { useLanguage } from "../i18n/index.js";
 
-export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, onSwitchAccount, onLogout, onRefresh }) {
+export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, onSwitchAccount, onDeleteAccount, onLogout, onRefresh }) {
     const [activeTab, setActiveTab] = useState("lost");
+    const [confirmDelete, setConfirmDelete] = useState(null); // { id, username }
     const { t, lang, toggle } = useLanguage();
 
     const TABS = [
@@ -37,16 +38,61 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
         return pks.map(pk => fullMap[pk] || { pk, username: pk, full_name: "" });
     }
 
-    function getTabCount(key) {
-        if (key === "engagement") {
-            const getScore = v => v && typeof v === "object" ? (v.score ?? 0) : (v ?? 0);
-            return followers.filter(u => getScore(engagement[u.pk]) === 0).length;
+    // Memoize tab counts to avoid re-iterating on every render
+    const tabCounts = useMemo(() => {
+        const counts = {};
+        for (const key of ["lost", "not_back", "new", "fans", "deactivated"]) {
+            counts[key] = (stats[key] || []).length;
         }
-        if (key === "requests") {
-            return (requests.pending?.length || 0);
-        }
-        return (stats[key] || []).length;
-    }
+        const getScore = v => v && typeof v === "object" ? (v.score ?? 0) : (v ?? 0);
+        counts.engagement = followers.filter(u => getScore(engagement[u.pk]) === 0).length;
+        counts.requests = (requests.pending?.length || 0);
+        return counts;
+    }, [stats, followers, engagement, requests]);
+
+    // ── Data Export ──────────────────────────────────────────────────────────
+    const handleExport = useCallback(() => {
+        const normalize = e => {
+            if (!e) return { post_likes: 0, story_views: 0, story_likes: 0, score: 0 };
+            if (typeof e === "number") return { post_likes: e, story_views: 0, story_likes: 0, score: e };
+            return { post_likes: e.post_likes ?? 0, story_views: e.story_views ?? 0, story_likes: e.story_likes ?? 0, score: e.score ?? 0 };
+        };
+
+        const mapUsers = list => (list || []).map(u => ({
+            username: u.username, full_name: u.full_name || "", is_verified: !!u.is_verified,
+        }));
+
+        const exportData = {
+            exported_at: new Date().toISOString(),
+            account: snapshot?.currentUser?.username || snapshot?.userId || "unknown",
+            follower_count: followers.length,
+            following_count: following.length,
+            stats: {
+                lost: mapUsers(stats.lost),
+                not_back: mapUsers(stats.not_back),
+                new: mapUsers(stats.new),
+                fans: mapUsers(stats.fans),
+                deactivated: mapUsers(stats.deactivated),
+            },
+            engagement: Object.entries(engagement)
+                .map(([pk, e]) => {
+                    const user = fullMap[pk];
+                    const n = normalize(e);
+                    return { username: user?.username || pk, ...n };
+                })
+                .filter(e => e.score > 0)
+                .sort((a, b) => b.score - a.score),
+            history,
+        };
+
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `ig_analytics_${exportData.account}_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }, [snapshot, followers, following, stats, engagement, fullMap, history]);
 
     const lastSync = modifiedTime
         ? new Date(modifiedTime).toLocaleString()
@@ -70,6 +116,21 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
                             ))}
                         </select>
                     )}
+                    {accounts.length > 1 && (
+                        <button
+                            className="btn-delete-account"
+                            title={t("deleteAccountTip")}
+                            onClick={() => {
+                                const acc = accounts.find(a => a.id === selectedId);
+                                setConfirmDelete({ id: selectedId, username: acc?.username || acc?.userId || "?" });
+                            }}
+                        >
+                            {t("deleteAccount")}
+                        </button>
+                    )}
+                    <button className="btn-export" onClick={handleExport} title={t("exportBtn")}>
+                        {t("exportBtn")}
+                    </button>
                     <button className="btn-lang" onClick={toggle}>{lang === "tr" ? "EN" : "TR"}</button>
                     <button className="btn-secondary" onClick={onRefresh}>{t("refresh")}</button>
                     <button className="btn-ghost" onClick={onLogout}>{t("logout")}</button>
@@ -83,7 +144,7 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
                         className={`stat-card ${activeTab === tab.key ? "active" : ""}`}
                         onClick={() => setActiveTab(tab.key)}
                         style={{ "--accent": tab.color }}>
-                        <div className="stat-count" style={{ color: tab.color }}>{getTabCount(tab.key)}</div>
+                        <div className="stat-count" style={{ color: tab.color }}>{tabCounts[tab.key]}</div>
                         <div className="stat-label">{tab.label}</div>
                     </div>
                 ))}
@@ -99,7 +160,7 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
                         style={activeTab === tab.key ? { borderBottomColor: tab.color, color: tab.color } : {}}
                         onClick={() => setActiveTab(tab.key)}>
                         {tab.label}
-                        <span className="tab-count">{getTabCount(tab.key)}</span>
+                        <span className="tab-count">{tabCounts[tab.key]}</span>
                     </button>
                 ))}
             </nav>
@@ -124,6 +185,32 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
             <footer className="dash-footer">
                 {t("lastUpdated")}: {lastSync} &bull; {t("dataStoredDrive")}
             </footer>
+
+            {/* Delete confirmation modal */}
+            {confirmDelete && (
+                <div className="modal-overlay" onClick={() => setConfirmDelete(null)}>
+                    <div className="modal-card" onClick={e => e.stopPropagation()}>
+                        <p className="modal-title">{t("deleteConfirmTitle")}</p>
+                        <p className="modal-desc">
+                            {t("deleteConfirmDesc").replace("{account}", `@${confirmDelete.username}`)}
+                        </p>
+                        <div className="modal-actions">
+                            <button className="btn-secondary" onClick={() => setConfirmDelete(null)}>
+                                {t("deleteCancel")}
+                            </button>
+                            <button
+                                className="btn-danger"
+                                onClick={() => {
+                                    onDeleteAccount(confirmDelete.id);
+                                    setConfirmDelete(null);
+                                }}
+                            >
+                                {t("deleteConfirm")}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

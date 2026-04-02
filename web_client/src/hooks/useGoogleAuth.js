@@ -6,8 +6,8 @@ const EXPIRY_KEY = "ig_analytics_token_expiry";
 
 function loadStoredToken() {
     try {
-        const token  = localStorage.getItem(TOKEN_KEY);
-        const expiry = parseInt(localStorage.getItem(EXPIRY_KEY) || "0", 10);
+        const token  = sessionStorage.getItem(TOKEN_KEY);
+        const expiry = parseInt(sessionStorage.getItem(EXPIRY_KEY) || "0", 10);
         if (token && Date.now() < expiry) return token;
     } catch {}
     return null;
@@ -23,8 +23,8 @@ export function useGoogleAuth() {
             const { access_token, expires_in = 3600 } = tokenResponse;
             const expiresAt = Date.now() + expires_in * 1000 - 60_000; // 1 min buffer
             try {
-                localStorage.setItem(TOKEN_KEY, access_token);
-                localStorage.setItem(EXPIRY_KEY, String(expiresAt));
+                sessionStorage.setItem(TOKEN_KEY, access_token);
+                sessionStorage.setItem(EXPIRY_KEY, String(expiresAt));
             } catch {}
             setToken(access_token);
             setError(null);
@@ -36,13 +36,31 @@ export function useGoogleAuth() {
     });
 
     const logout = useCallback(() => {
+        const currentToken = token;
         try {
-            localStorage.removeItem(TOKEN_KEY);
-            localStorage.removeItem(EXPIRY_KEY);
+            sessionStorage.removeItem(TOKEN_KEY);
+            sessionStorage.removeItem(EXPIRY_KEY);
         } catch {}
         setToken(null);
         setError(null);
-    }, []);
+        // Revoke the token so it can't be reused
+        if (currentToken) {
+            fetch(`https://oauth2.googleapis.com/revoke?token=${currentToken}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            }).catch(() => {});
+        }
+    }, [token]);
+
+    // Auto-logout when token expires
+    useEffect(() => {
+        if (!token) return;
+        const expiry = parseInt(sessionStorage.getItem(EXPIRY_KEY) || "0", 10);
+        const remaining = expiry - Date.now();
+        if (remaining <= 0) { logout(); return; }
+        const timer = setTimeout(logout, remaining);
+        return () => clearTimeout(timer);
+    }, [token, logout]);
 
     return { token, error, login, logout };
 }
