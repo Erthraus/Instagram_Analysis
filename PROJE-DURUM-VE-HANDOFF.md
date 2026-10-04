@@ -12,9 +12,9 @@
 | | |
 |---|---|
 | **Durum** | 🟡 Kod hazır ve testleri geçiyor; gerçek Chrome + Instagram ile uçtan uca deneme bekliyor |
-| **Son yapılan** | 2026-10-04 — Yerel iş repoya taşındı, 4 hata düzeltildi, eski veriyle geriye dönük takipçi farkı eklendi |
+| **Son yapılan** | 2026-10-04 — Yerel iş repoya taşındı, 4 hata düzeltildi, eski veriyle geriye dönük takipçi farkı eklendi (PR #1 ile `main`'e birleştirildi) |
 | **Sıradaki adım** | Eklentiyi Chrome'a yükle → eski veri dosyasını içe aktar → Sync'e bas (bkz. Bölüm 4) |
-| **Senden beklenen karar** | 1) `v3-sync-and-retro-diff` PR'ını (Pull Request / birleştirme isteği) `main`'e birleştir. 2) Proje klasöründeki eski `session_*` dosyasını sil (bkz. Bölüm 5). |
+| **Senden beklenen karar** | Proje klasöründeki eski `session_*` dosyasını sil (bkz. Bölüm 5). |
 
 ---
 
