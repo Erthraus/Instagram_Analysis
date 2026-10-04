@@ -2,11 +2,13 @@
 
 ## 1. Executive Summary
 
-A decentralized Instagram analytics platform that tracks follower/following asymmetries, detects frozen/deleted accounts, and monitors audience changes over time. Risky operations (scraping, session management) are performed either through the user's own browser (Chrome Extension) or their desktop app — never on a central server. Data is stored encrypted and isolated in the user's own Google Drive. This eliminates server costs and removes the project from the scope of data protection regulations (GDPR/KVKK).
+A decentralized Instagram analytics platform that tracks follower/following asymmetries, detects frozen/deleted accounts, and monitors audience changes over time. Risky operations (scraping, session management) are performed in the user's own browser (Chrome Extension) — never on a central server. Data is stored gzip-compressed in an app-private folder of the user's own Google Drive; the app adds no encryption of its own beyond what Drive provides. This eliminates server costs and removes the project from the scope of data protection regulations (GDPR/KVKK).
 
 ---
 
 ## 2. System Architecture (3-Tier)
+
+> **Note:** the Python desktop app (`insta_flet.py`) was removed from the repository. It still appears below and in the feature matrix because its data file (schema v0) can be imported as a baseline — see 4.6.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -87,8 +89,10 @@ For each user in `lost`, after comparing snapshots:
    └─ Profile loads normally → "active" (truly unfollowed)
 
 2. Classification carries forward to next run (no re-checking stable entries)
-3. If newly_lost > 50: process first 50, defer rest to next run
-4. Sleep 2.5–4.0 seconds between each check (rate limit protection)
+3. At most 200 checks are queued per sync; they run in batches of 40 per alarm
+4. Sleep 3–5 seconds between each check (rate limit protection)
+5. If the check itself fails (rate limit, network) the result is "unknown" and
+   the user is left unchanged — they stay under "Unfollowers"
 ```
 
 **Why this matters:** Without this check, a deactivated account would appear in the "Unfollowers" tab — a false positive. This separates intentional unfollows from account deactivations.
@@ -104,6 +108,23 @@ Sent requests are scraped from DOM / internal API. Compared to previous snapshot
 User's last N posts + 24h stories are scanned. Likes, comments, story views are mapped to follower IDs:
 - High interaction → "Loyal Followers"
 - Zero interaction → "Ghost Followers"
+
+### 4.6 Retroactive Diff from a Legacy File
+*(Chrome Extension only)*
+
+The old desktop app wrote a `<username>_data.json` file (schema v0). The extension can use it as a one-time baseline:
+
+```
+1. Popup → "⇪" → import page → choose the file
+   (validated, reduced to follower/following usernames + names, kept in chrome.storage.local)
+2. Next sync: applyLegacyBaseline(snapshot, baseline)
+   ├─ baseline follower, not a follower now  → follower_lost   event
+   ├─ follower now, not in the baseline      → follower_gained event
+   └─ events carry `since: <baseline date>` and are skipped if already recorded
+3. After the snapshot is saved to Drive the local baseline copy is deleted
+```
+
+Limits: v0 has no numeric ids, so matching is by username — someone who renamed their account shows up as one lost plus one gained. If fewer than 30% of the baseline's followers still follow, the file is treated as belonging to another account and ignored. The Unfollowers tab shows changes since the previous sync, so the retroactive list is visible until the sync after it (the events stay in the log).
 
 ---
 
@@ -234,8 +255,11 @@ chrome_extension/
 │   └── popup.css          # Dark theme, card styles
 ├── content/
 │   └── instagram.js       # Instagram API calls inside page context
+├── import/
+│   ├── import.html        # Legacy data file import (opens in its own tab)
+│   └── import.js
 └── utils/
-    ├── analyzer.js        # buildSnapshot / applyStatusChecks — pure, unit-testable
+    ├── analyzer.js        # buildSnapshot / applyStatusChecks / applyLegacyBaseline — pure, unit-testable
     ├── migrate.js         # v0/v1/v2 → v3 transparent schema migration
     ├── derive.js          # Compute stats/engagement from a v3 snapshot
     ├── drive.js           # Google Drive upsert/read + avatars side-file
@@ -259,7 +283,7 @@ chrome_extension/
 
 ### Rate Limiting Strategy
 - Followers fetch → **30 second pause** → Following fetch
-- Deactivated checks: scheduled via `chrome.alarms` **5 minutes after** main analysis
+- Deactivated checks: scheduled via `chrome.alarms` **5 minutes after** main analysis, in batches of 40
 - On HTTP 429 or 401: exponential backoff — `2^attempt × 5000ms`, max 3 retries
 - Last-run timestamp stored in `chrome.storage.local`; block re-run if < 30 minutes elapsed
 
@@ -364,6 +388,7 @@ Token + snapshot → <Dashboard> (5 tabs: Lost, Not Back, New, Fans, Frozen/Dele
 - Profile picture separation (`Avatars_{userId}.json`)
 - Rolling backup (`Analytics_Backup_{userId}.json`)
 - 365-day follower history
+- Retroactive diff from a legacy v0 file (import page)
 
 ### Phase 4 — Future
 - Mobile app / PWA
@@ -376,13 +401,9 @@ Token + snapshot → <Dashboard> (5 tabs: Lost, Not Back, New, Fans, Frozen/Dele
 
 ## 12. Setup & Development
 
-### Python Desktop App
+### Tests
 ```bash
-cd Instagram_Analysis
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python insta_flet.py
+npm test           # node --test tests/*.test.js — no install needed (Node 20+)
 ```
 
 ### Chrome Extension (Local)
