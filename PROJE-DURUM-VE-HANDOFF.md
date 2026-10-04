@@ -94,6 +94,7 @@ Bilinmesi gerekenler:
 |---|---|---|---|
 | 1 | Uçtan uca deneme kısmen yapıldı | Orta | Proje sahibi 2026-10-04'te gerçek Chrome + Instagram ile denedi, çalışıyor. Ayrıca doğrulanmayanlar: 40'tan uzun durum kontrolü listeleri, Drive kaydı başarısız olunca yeniden deneme |
 | 2 | Eski Instagram oturumu hâlâ geçerli olabilir | Orta | Eski Python uygulamasının `session_*` dosyası 2026-10-04'te proje klasöründen Çöp Kutusu'na taşındı. Dosyayı silmek oturumu iptal etmez: Instagram ayarlarından eski oturumları kapat, sonra Çöp Kutusu'nu boşalt |
+| 9 | Google Cloud projesi başka bir uygulamayla ortak | Orta | Eklenti ve web arayüzü, YouTube uygulamasıyla aynı Google Cloud projesindeki OAuth istemcilerini kullanıyor. Google giriş ekranında o uygulamanın adı görünüyor. Web girişi artık sadece kendi iznini istiyor (bkz. günlük); kalıcı çözüm bu proje için ayrı bir Cloud projesi açmak |
 | 3 | "Çıkanlar" için tüm zamanlar görünümü yok | Orta | Sadece son Sync'ten beri olanlar listeleniyor; günlükteki eski kayıtları gösteren bir seçenek eklenebilir |
 | 4 | Vite / esbuild geliştirme sunucusu uyarısı | Düşük | Sadece `npm run dev` sırasında geçerli. Düzeltmesi Vite'ı 5'ten 8'e yükseltmeyi gerektiriyor (kırıcı değişiklik) |
 | 5 | Durum kontrolü başarısız olan hesaplar yeniden denenmiyor | Düşük | "Çıkanlar"da kalırlar; dondurulmuş olsalar bile ayrıştırılmaz |
@@ -148,3 +149,20 @@ cd web_client && npm run build && npm audit --omit=dev
 - Eski `session_*` dosyası proje klasöründen Çöp Kutusu'na taşındı.
 - Web arayüzü yerelde açıldı (`http://localhost:5173`): giriş ekranı hatasız geliyor.
   Google girişi sonrası ekranlar bu oturumda doğrulanmadı.
+
+### 2026-10-04 (devam) — Web arayüzünde Google giriş hatası
+
+**Belirti:** Web arayüzünde Google ile girişte "Hata 400: invalid_request — This request contains
+scopes that cannot be requested together: [youtube, drive.file]".
+
+**Neden:** Web arayüzü sadece `drive.appdata` iznini istiyor. Ancak Google'ın giriş kütüphanesi
+varsayılan olarak, aynı Google Cloud projesine daha önce verilmiş tüm izinleri isteğe ekliyor
+(`include_granted_scopes=true`). Bu proje YouTube uygulamasıyla ortak olduğu için YouTube ve
+Drive izinleri aynı isteğe giriyor; Google bu ikisini tek istekte kabul etmiyor.
+
+**Düzeltme:** `web_client/src/hooks/useGoogleAuth.js` içinde `include_granted_scopes: false`.
+Ek fayda: web arayüzünün aldığı erişim anahtarı artık YouTube ve Sheets yetkisi taşımıyor.
+
+**Doğrulama:** Giriş isteğinin adresi tarayıcıda yakalandı. Önce: `include_granted_scopes=true`.
+Sonra: `include_granted_scopes=false`, istenen izinler `openid profile email drive.appdata`.
+Gerçek Google hesabıyla giriş bu oturumda yapılmadı; proje sahibinin denemesi gerekiyor.

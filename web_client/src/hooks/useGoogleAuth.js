@@ -19,6 +19,10 @@ export function useGoogleAuth() {
 
     const login = useGoogleLogin({
         scope: "https://www.googleapis.com/auth/drive.appdata",
+        // Ask only for this app's scope. By default Google folds in every scope the
+        // user already granted to the same Cloud project; when another app in that
+        // project holds YouTube scopes, Google rejects the combined request (400).
+        include_granted_scopes: false,
         onSuccess: (tokenResponse) => {
             const { access_token, expires_in = 3600 } = tokenResponse;
             const expiresAt = Date.now() + expires_in * 1000 - 60_000; // 1 min buffer
