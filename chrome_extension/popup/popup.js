@@ -16,6 +16,7 @@ const I18N = {
         lastSyncNever:   "Son sync: hiç",
         lastSyncPrefix:  "Son sync:",
         forceTip:        "Cooldown'ı atla (geliştirici)",
+        importTip:       "Eski veri dosyasını içe aktar",
         syncTimeout:     "Senkronizasyon zaman aşımına uğradı. Tekrar deneyin.",
         // card labels
         cardLost:        "Takipten Çıkan",
@@ -65,6 +66,7 @@ const I18N = {
         lastSyncNever:   "Last sync: never",
         lastSyncPrefix:  "Last sync:",
         forceTip:        "Bypass cooldown (dev)",
+        importTip:       "Import a legacy data file",
         syncTimeout:     "Sync timed out. Please try again.",
         // card labels
         cardLost:        "Unfollowers",
@@ -125,6 +127,7 @@ function applyLanguage() {
     // authMsg is a static string (not user data), safe to use innerHTML
     document.getElementById("auth-message").innerHTML = t("authMsg");
     document.getElementById("btn-force-sync").title = t("forceTip");
+    document.getElementById("btn-import").title = t("importTip");
 
     const footer = document.getElementById("last-sync-text");
     if (footer.dataset.never === "true") footer.textContent = t("lastSyncNever");
@@ -315,6 +318,11 @@ async function startSync(force = false) {
 
 btnSync.addEventListener("click",      () => startSync(false));
 btnForceSync.addEventListener("click", () => startSync(true));
+
+// The import page opens in its own tab: a file picker would close this popup.
+document.getElementById("btn-import").addEventListener("click", () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL("import/import.html") });
+});
 
 // ── Tab buttons ───────────────────────────────────────────────────────────────
 

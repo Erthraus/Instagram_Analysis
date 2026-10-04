@@ -5,8 +5,12 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildSnapshot, applyStatusChecks } from "../chrome_extension/utils/analyzer.js";
-import { STATUS, EVENT_TYPES, SCHEMA_VERSION } from "../chrome_extension/utils/migrate.js";
+import { readFileSync } from "node:fs";
+import { buildSnapshot, applyStatusChecks, applyLegacyBaseline, sanitizeLegacyBaseline } from "../chrome_extension/utils/analyzer.js";
+import { migrate, STATUS, EVENT_TYPES, SCHEMA_VERSION } from "../chrome_extension/utils/migrate.js";
+import { deriveStats } from "../chrome_extension/utils/derive.js";
+
+const legacyFixture = () => JSON.parse(readFileSync(new URL("./fixtures/legacy_v0_sample.json", import.meta.url), "utf8"));
 
 const user = (pk, username, extras = {}) => ({
     pk: String(pk),
@@ -200,9 +204,11 @@ describe("applyStatusChecks (v3)", () => {
         assert.equal(evs.length, 2);
     });
 
-    it("treats unknown status as deactivated", () => {
+    it("leaves the user untouched when the check failed (unknown)", () => {
         const out = applyStatusChecks(snap, { "1": "unknown" });
-        assert.equal(out.users["1"].lifecycle.status, STATUS.DEACTIVATED);
+        assert.equal(out.users["1"].lifecycle.status, STATUS.ACTIVE);
+        assert.equal(out.users["1"].lifecycle.status_checked_at, null);
+        assert.equal(out.events.filter(e => e.type === EVENT_TYPES.STATUS_CHANGED).length, 0);
     });
 
     it("does not emit events when status is unchanged", () => {
@@ -260,5 +266,100 @@ describe("engagement merge", () => {
             engagement: {},
         }));
         assert.equal(snapshot.users["1"].engagement.score, 10);
+    });
+});
+
+// ── legacy baseline (retroactive diff) ───────────────────────────────────────
+
+describe("sanitizeLegacyBaseline", () => {
+    it("keeps only the fields the diff needs", () => {
+        const out = sanitizeLegacyBaseline(legacyFixture());
+        assert.deepEqual(out.followers_list, ["alice", "bob", "carol", "erin"]);
+        assert.deepEqual(out.following_list, ["alice", "dave"]);
+        assert.deepEqual(out.full_map.alice, { username: "alice", full_name: "Alice Example" });
+        assert.equal(out.timestamp, "2026-02-05 01:19:16");
+        assert.equal(out.stats, undefined);
+    });
+
+    it("drops entries that are not plausible usernames", () => {
+        const raw = legacyFixture();
+        raw.followers_list.push(42, "", "x".repeat(65));
+        assert.deepEqual(sanitizeLegacyBaseline(raw).followers_list, ["alice", "bob", "carol", "erin"]);
+    });
+
+    it("rejects files that are not in the v0 format", () => {
+        assert.throws(() => sanitizeLegacyBaseline({}));
+        assert.throws(() => sanitizeLegacyBaseline(buildSnapshot(null, scrape()).snapshot));
+        assert.throws(() => sanitizeLegacyBaseline({ ...legacyFixture(), followers_list: [] }));
+    });
+});
+
+describe("applyLegacyBaseline", () => {
+    // Baseline (2026-02-05) followers: alice, bob, carol, erin.
+    // Today: alice and carol still follow, bob is only followed by me,
+    // erin is gone entirely and frank is a new follower.
+    const baseline = migrate(sanitizeLegacyBaseline(legacyFixture()));
+    const today = buildSnapshot(null, scrape({
+        followers: [user(1, "alice"), user(3, "Carol"), user(6, "frank")],
+        following: [user(1, "alice"), user(2, "bob")],
+    })).snapshot;
+    const out = applyLegacyBaseline(today, baseline);
+    const pksOf = (type) => out.snapshot.events.filter(e => e.type === type).map(e => e.pk).sort();
+
+    it("emits follower_lost for baseline followers who no longer follow", () => {
+        assert.equal(out.applied, true);
+        assert.deepEqual(pksOf(EVENT_TYPES.FOLLOWER_LOST), ["2", "legacy:erin"]);
+        assert.equal(out.snapshot.users["legacy:erin"].username, "erin");
+        assert.equal(out.snapshot.users["legacy:erin"].flags.is_follower, false);
+    });
+
+    it("emits follower_gained for followers missing from the baseline", () => {
+        assert.deepEqual(pksOf(EVENT_TYPES.FOLLOWER_GAINED), ["6"]);
+    });
+
+    it("matches usernames case-insensitively and backdates first_seen_at", () => {
+        assert.equal(out.snapshot.users["3"].lifecycle.first_seen_at, baseline.snapshot_at);
+        assert.equal(out.snapshot.users["6"].lifecycle.first_seen_at, today.snapshot_at);
+    });
+
+    it("marks events with the baseline date and records it in metadata", () => {
+        assert.ok(out.snapshot.events.every(e => e.since === baseline.snapshot_at));
+        assert.equal(out.snapshot.metadata.legacy_baseline_at, baseline.snapshot_at);
+    });
+
+    it("surfaces the differences through deriveStats", () => {
+        const stats = deriveStats(out.snapshot);
+        assert.deepEqual(stats.lost.map(u => u.username).sort(), ["bob", "erin"]);
+        assert.deepEqual(stats.new.map(u => u.username), ["frank"]);
+    });
+
+    it("queues account status checks for the lost users", () => {
+        assert.deepEqual(out.pendingStatusChecks, [
+            { pk: "2", username: "bob" },
+            { pk: "legacy:erin", username: "erin" },
+        ]);
+    });
+
+    it("adds nothing when applied a second time", () => {
+        const again = applyLegacyBaseline(out.snapshot, baseline);
+        assert.equal(again.snapshot.events.length, out.snapshot.events.length);
+        assert.deepEqual(again.pendingStatusChecks, []);
+    });
+
+    it("does not duplicate a loss the regular diff already recorded", () => {
+        const prev = buildSnapshot(null, scrape({
+            timestamp: "2026-04-01T10:00:00.000Z",
+            followers: [user(1, "alice"), user(2, "bob"), user(3, "carol")],
+        })).snapshot;
+        const next = buildSnapshot(prev, scrape({ followers: [user(1, "alice"), user(3, "carol")] })).snapshot;
+        const merged = applyLegacyBaseline(next, baseline).snapshot;
+        assert.equal(merged.events.filter(e => e.type === EVENT_TYPES.FOLLOWER_LOST && e.pk === "2").length, 1);
+    });
+
+    it("ignores a baseline that belongs to a different account", () => {
+        const other = buildSnapshot(null, scrape({ followers: [user(7, "zed"), user(8, "yan")] })).snapshot;
+        const res = applyLegacyBaseline(other, baseline);
+        assert.equal(res.applied, false);
+        assert.equal(res.snapshot, other);
     });
 });

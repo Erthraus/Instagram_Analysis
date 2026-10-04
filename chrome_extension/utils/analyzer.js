@@ -8,10 +8,17 @@
  *   - a list of pks that need a deactivated-status check
  */
 
-import { STATUS, EVENT_TYPES, SCHEMA_VERSION } from "./migrate.js";
+import { STATUS, EVENT_TYPES, SCHEMA_VERSION, detectVersion } from "./migrate.js";
 
 const HISTORY_CAP = 365;
 const EVENT_CAP   = 5000;
+
+const LEGACY_PREFIX       = "legacy:";
+const MAX_USERNAME_LENGTH = 64;
+const MAX_FULL_NAME_LENGTH = 200;
+// If fewer than this share of the baseline's followers still follow, the file
+// is assumed to belong to a different account and is ignored.
+const MIN_BASELINE_OVERLAP = 0.3;
 
 /**
  * Build a fresh v3 snapshot.
@@ -148,7 +155,8 @@ export function buildSnapshot(prev, scraped) {
 /**
  * Apply deactivated-check results to a v3 snapshot.
  * Each pk in statusMap may be one of: active | deactivated | deleted | unknown.
- * `unknown` is treated as deactivated (matches old behavior).
+ * `unknown` means the check itself failed (rate limit, network): the user is
+ * left as-is, so a real unfollower is never hidden as a frozen account.
  */
 export function applyStatusChecks(snapshot, statusMap) {
     const ts = new Date().toISOString();
@@ -162,7 +170,8 @@ export function applyStatusChecks(snapshot, statusMap) {
         const after = status === "active" ? STATUS.ACTIVE
                     : status === "deleted" ? STATUS.DELETED
                     : status === "deactivated" ? STATUS.DEACTIVATED
-                    : STATUS.DEACTIVATED; // unknown
+                    : null; // unknown
+        if (!after) continue;
         users[pk] = {
             ...u,
             lifecycle: { ...u.lifecycle, status: after, status_checked_at: ts },
@@ -175,6 +184,115 @@ export function applyStatusChecks(snapshot, statusMap) {
         ...snapshot,
         users,
         events: events.slice(-EVENT_CAP),
+    };
+}
+
+// ── Legacy baseline (retroactive diff) ───────────────────────────────────────
+
+/**
+ * Validate an imported legacy (v0) data file and keep only the fields the
+ * retroactive diff needs. Throws if the file is not in the v0 format.
+ */
+export function sanitizeLegacyBaseline(raw) {
+    if (detectVersion(raw) !== 0) throw new Error("Not a legacy (v0) data file.");
+    const names = (list) => (Array.isArray(list) ? list : [])
+        .filter(n => typeof n === "string" && n.length > 0 && n.length <= MAX_USERNAME_LENGTH);
+    const followers = names(raw.followers_list);
+    const following = names(raw.following_list);
+    if (followers.length === 0) throw new Error("Legacy data file has no followers.");
+
+    const full_map = {};
+    for (const username of new Set([...followers, ...following])) {
+        const fullName = raw.full_map[username]?.full_name;
+        full_map[username] = {
+            username,
+            full_name: typeof fullName === "string" ? fullName.slice(0, MAX_FULL_NAME_LENGTH) : "",
+        };
+    }
+    return { timestamp: String(raw.timestamp ?? ""), followers_list: followers, following_list: following, full_map };
+}
+
+/**
+ * Fold a legacy (v0) baseline into a freshly built snapshot so follower
+ * changes since the baseline date become visible as events.
+ *
+ * v0 has no pks, so users are matched by username: a follower who renamed
+ * their account since the baseline shows up as one lost plus one gained.
+ * Changes already present in the event log are not emitted again.
+ *
+ * @param {object} snapshot  v3 snapshot from buildSnapshot
+ * @param {object} baseline  v0 file migrated to v3 (users keyed `legacy:<username>`)
+ * @returns {{ snapshot, applied: boolean, pendingStatusChecks: array }}
+ */
+export function applyLegacyBaseline(snapshot, baseline) {
+    const ts = snapshot.snapshot_at;
+    const baselineTs = baseline.snapshot_at;
+    const users = { ...snapshot.users };
+
+    // username → key; a real pk wins over a leftover legacy key
+    const keyByUsername = new Map();
+    for (const [key, u] of Object.entries(users)) {
+        const name = u.username?.toLowerCase();
+        if (name && (!key.startsWith(LEGACY_PREFIX) || !keyByUsername.has(name))) keyByUsername.set(name, key);
+    }
+    const followsNow = (username) => !!users[keyByUsername.get(username.toLowerCase())]?.flags?.is_follower;
+
+    const baselineFollowers = Object.values(baseline.users || {}).filter(u => u.flags?.is_follower && u.username);
+    const stillFollowing = baselineFollowers.filter(u => followsNow(u.username)).length;
+    if (baselineFollowers.length === 0 || stillFollowing / baselineFollowers.length < MIN_BASELINE_OVERLAP) {
+        return { snapshot, applied: false, pendingStatusChecks: [] };
+    }
+
+    const events = [...(snapshot.events || [])];
+    const recorded = new Set(events.map(e => `${e.type}:${e.pk}`));
+    const addEvent = (type, pk) => {
+        if (recorded.has(`${type}:${pk}`)) return false;
+        recorded.add(`${type}:${pk}`);
+        events.push({ ts, type, pk, since: baselineTs });
+        return true;
+    };
+
+    const pendingStatusChecks = [];
+    const baselineNames = new Set();
+    for (const b of baselineFollowers) {
+        const name = b.username.toLowerCase();
+        baselineNames.add(name);
+
+        let key = keyByUsername.get(name);
+        if (key) {
+            const u = users[key];
+            const oldest = [u.lifecycle.first_seen_at, baselineTs].sort()[0];
+            users[key] = { ...u, lifecycle: { ...u.lifecycle, first_seen_at: oldest } };
+        } else {
+            // Not a follower, not followed and not pending today — no pk is known.
+            key = `${LEGACY_PREFIX}${b.username}`;
+            users[key] = { ...b, flags: { is_follower: false, is_following: false, is_pending: false, is_requester: false } };
+        }
+
+        if (users[key].flags.is_follower) continue;
+        if (addEvent(EVENT_TYPES.FOLLOWER_LOST, key)) {
+            const status = users[key].lifecycle.status;
+            if (status !== STATUS.DEACTIVATED && status !== STATUS.DELETED) {
+                pendingStatusChecks.push({ pk: key, username: users[key].username });
+            }
+        }
+    }
+
+    for (const [key, u] of Object.entries(users)) {
+        if (u.flags?.is_follower && u.username && !baselineNames.has(u.username.toLowerCase())) {
+            addEvent(EVENT_TYPES.FOLLOWER_GAINED, key);
+        }
+    }
+
+    return {
+        snapshot: {
+            ...snapshot,
+            users,
+            events:   events.slice(-EVENT_CAP),
+            metadata: { ...snapshot.metadata, legacy_baseline_at: baselineTs },
+        },
+        applied: true,
+        pendingStatusChecks,
     };
 }
 

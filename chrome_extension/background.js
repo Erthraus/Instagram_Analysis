@@ -14,7 +14,7 @@
  */
 
 import { saveSnapshot, loadSnapshot, loadRawSnapshot, saveAvatars } from "./utils/drive.js";
-import { buildSnapshot, applyStatusChecks } from "./utils/analyzer.js";
+import { buildSnapshot, applyStatusChecks, applyLegacyBaseline } from "./utils/analyzer.js";
 import { deriveStats, deriveEngagement } from "./utils/derive.js";
 import { reconcileLegacyUsernames, extractLegacyAvatars, migrate, STATUS } from "./utils/migrate.js";
 
@@ -22,6 +22,7 @@ const ALARM_STATUS_CHECK        = "deactivated_status_check";
 const ALARM_DRIVE_RETRY         = "drive_save_retry";
 const MIN_SYNC_INTERVAL_MS      = 30 * 60 * 1000;
 const MAX_STATUS_CHECKS_PER_RUN = 200;  // was 50 — more aggressive resolution
+const STATUS_CHECK_BATCH        = 40;   // ~4s per check — keeps one alarm run well under the 5-min service-worker limit
 const FETCH_B64_TIMEOUT_MS      = 5_000;
 const FETCH_B64_MAX_BYTES       = 2 * 1024 * 1024;
 const DRIVE_RETRY_MAX           = 3;
@@ -152,7 +153,12 @@ async function handleRunSync(tabId, force = false) {
         throw new Error("Sync başlatmadan önce bir sekmede instagram.com'u açın.");
     }
 
-    chrome.tabs.sendMessage(igTab, { type: "RUN_ANALYSIS" }).catch(() => {});
+    try {
+        await chrome.tabs.sendMessage(igTab, { type: "RUN_ANALYSIS" });
+    } catch {
+        // Content script is missing — the tab was opened before the extension was (re)loaded.
+        throw new Error("Instagram sekmesine ulaşılamadı. Sekmeyi yenileyip (F5) tekrar deneyin.");
+    }
     await chrome.storage.local.set({ last_run_time: Date.now() });
 }
 
@@ -236,7 +242,19 @@ async function handleAnalysisComplete(scraped) {
 
     sendProgress("Snapshot oluşturuluyor...");
 
-    const { snapshot, pendingStatusChecks } = buildSnapshot(prevSnapshot, scraped);
+    let { snapshot, pendingStatusChecks } = buildSnapshot(prevSnapshot, scraped);
+
+    // Legacy data file imported via import/import.html → retroactive diff
+    const { legacy_baseline } = await chrome.storage.local.get(["legacy_baseline"]);
+    if (legacy_baseline) {
+        const merged = applyLegacyBaseline(snapshot, migrate(legacy_baseline));
+        if (merged.applied) {
+            snapshot = merged.snapshot;
+            pendingStatusChecks = [...pendingStatusChecks, ...merged.pendingStatusChecks];
+        } else {
+            console.warn("[ig-analytics] Imported legacy data does not match this account — skipped");
+        }
+    }
 
     // Fold leftover legacy:<username> entries from v0 migration into matching pks
     if (prevSnapshot?.metadata?.legacy_v0) {
@@ -357,6 +375,11 @@ async function saveToDriveInBackground(snapshot, pendingChecks, userId, retryCou
 
     await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count", "pending_drive_userId"]);
 
+    // The baseline is now part of the Drive snapshot — drop the local copy so it is applied only once.
+    if (snapshot.metadata?.legacy_baseline_at) {
+        await chrome.storage.local.remove(["legacy_baseline"]);
+    }
+
     // Schedule deactivated status checks (limit per run honored by alarm handler)
     if (pendingChecks.length > 0) {
         const truncated = pendingChecks.slice(0, MAX_STATUS_CHECKS_PER_RUN);
@@ -387,8 +410,11 @@ async function runDeactivatedStatusChecks() {
     const csrfToken = cookies.find(c => c.name === "csrftoken")?.value;
     if (!csrfToken) return;
 
+    const batch     = pending_status_checks.slice(0, STATUS_CHECK_BATCH);
+    const remaining = pending_status_checks.slice(STATUS_CHECK_BATCH);
+
     const statusMap = {};
-    for (const user of pending_status_checks) {
+    for (const user of batch) {
         try {
             const response = await chrome.tabs.sendMessage(igTabId, {
                 type: "CHECK_ACCOUNT_STATUS",
@@ -416,8 +442,10 @@ async function runDeactivatedStatusChecks() {
     const stats = deriveStats(updatedSnapshot);
     const avatars = (await chrome.storage.local.get(["avatars_" + pending_checks_user_id]))["avatars_" + pending_checks_user_id] || {};
     const enrich = (list) => list.map(u => ({ ...u, profile_pic_b64: avatars[u.pk] || null }));
+    const { diff_result: prevDiff } = await chrome.storage.local.get(["diff_result"]);
     await chrome.storage.local.set({
         diff_result: {
+            ...(prevDiff || {}),   // keep engagement_summary / requests from the sync
             lost:        enrich(stats.lost),
             not_back:    enrich(stats.not_back),
             new:         enrich(stats.new),
@@ -425,8 +453,11 @@ async function runDeactivatedStatusChecks() {
             deactivated: enrich(stats.deactivated),
             pending:     enrich(stats.pending),
         },
-        pending_status_checks: [],
+        pending_status_checks: remaining,
     });
+    if (remaining.length > 0) {
+        chrome.alarms.create(ALARM_STATUS_CHECK, { delayInMinutes: 1 });
+    }
     chrome.runtime.sendMessage({ type: "STATUS_CHECKS_COMPLETE" }).catch(() => {});
 }
 
