@@ -1,21 +1,21 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { listSnapshots, loadSnapshotById, deleteSnapshot } from "../utils/driveApi.js";
+import { listSnapshots, loadSnapshotById, deleteSnapshot, loadAvatars } from "../utils/driveApi.js";
 
-const REFRESH_COOLDOWN_MS = 5000; // 5 seconds between refreshes
+const REFRESH_COOLDOWN_MS = 5000;
 
 /**
- * useDriveData — Fetches Analytics_Snapshot_{userId}.json from Drive.
- * Supports multiple Instagram accounts via account switching and deletion.
+ * useDriveData — fetches a v3 snapshot + matching avatars file from Drive.
  */
 export function useDriveData(token) {
-    const [accounts, setAccounts]       = useState([]); // [{ id, userId, modifiedTime, currentUser }]
-    const [selectedId, setSelectedId]   = useState(null); // Drive file ID
-    const [snapshot, setSnapshot]       = useState(null);
+    const [accounts, setAccounts]         = useState([]);
+    const [selectedId, setSelectedId]     = useState(null);
+    const [snapshot, setSnapshot]         = useState(null);
+    const [avatars, setAvatars]           = useState({});       // { pk: dataURI }
     const [modifiedTime, setModifiedTime] = useState(null);
-    const [loading, setLoading]         = useState(false);
-    const [error, setError]             = useState(null);
-    const [refreshKey, setRefreshKey]   = useState(0);
-    const lastRefreshAt                 = useRef(0);
+    const [loading, setLoading]           = useState(false);
+    const [error, setError]               = useState(null);
+    const [refreshKey, setRefreshKey]     = useState(0);
+    const lastRefreshAt                   = useRef(0);
 
     useEffect(() => {
         if (!token) return;
@@ -27,31 +27,30 @@ export function useDriveData(token) {
                 if (files.length === 0) {
                     setAccounts([]);
                     setSnapshot(null);
+                    setAvatars({});
                     setModifiedTime(null);
                     return;
                 }
 
-                // Pick: previously selected, or most recent
                 const targetFile = files.find(f => f.id === selectedId) || files[0];
-
                 const data = await loadSnapshotById(token, targetFile.id);
+                const avs  = await loadAvatars(token, targetFile.userId).catch(() => null);
 
-                // Build accounts list, enriching with username from snapshot if available
                 const enriched = files.map(f => ({
                     ...f,
                     username: f.id === targetFile.id
-                        ? (data.currentUser?.username || f.userId)
-                        : f.userId
+                        ? (data?.account?.username || f.userId)
+                        : f.userId,
                 }));
                 setAccounts(enriched);
                 setSelectedId(targetFile.id);
                 setSnapshot(data);
+                setAvatars(avs || {});
                 setModifiedTime(targetFile.modifiedTime);
             })
             .catch(err => setError(err.message || "Drive yükleme hatası."))
             .finally(() => setLoading(false));
-
-    }, [token, refreshKey]); // intentionally exclude selectedId — handled by switchAccount
+    }, [token, refreshKey]);
 
     const refresh = useCallback(() => {
         const now = Date.now();
@@ -67,12 +66,14 @@ export function useDriveData(token) {
         try {
             const data = await loadSnapshotById(token, fileId);
             const file = accounts.find(f => f.id === fileId);
+            const avs  = await loadAvatars(token, file?.userId).catch(() => null);
             setSelectedId(fileId);
             setSnapshot(data);
+            setAvatars(avs || {});
             setModifiedTime(file?.modifiedTime || null);
             setAccounts(prev => prev.map(f =>
                 f.id === fileId
-                    ? { ...f, username: data.currentUser?.username || f.userId }
+                    ? { ...f, username: data?.account?.username || f.userId }
                     : f
             ));
         } catch (err) {
@@ -94,17 +95,19 @@ export function useDriveData(token) {
             if (remaining.length === 0) {
                 setSelectedId(null);
                 setSnapshot(null);
+                setAvatars({});
                 setModifiedTime(null);
             } else if (fileId === selectedId) {
-                // Deleted the currently viewed account — switch to first remaining
                 const next = remaining[0];
                 const data = await loadSnapshotById(token, next.id);
+                const avs  = await loadAvatars(token, next.userId).catch(() => null);
                 setSelectedId(next.id);
                 setSnapshot(data);
+                setAvatars(avs || {});
                 setModifiedTime(next.modifiedTime || null);
                 setAccounts(prev => prev.map(f =>
                     f.id === next.id
-                        ? { ...f, username: data.currentUser?.username || f.userId }
+                        ? { ...f, username: data?.account?.username || f.userId }
                         : f
                 ));
             }
@@ -115,5 +118,5 @@ export function useDriveData(token) {
         }
     }, [token, selectedId, accounts]);
 
-    return { snapshot, modifiedTime, accounts, selectedId, loading, error, refresh, switchAccount, deleteAccount };
+    return { snapshot, avatars, modifiedTime, accounts, selectedId, loading, error, refresh, switchAccount, deleteAccount };
 }

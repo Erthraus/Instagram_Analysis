@@ -47,7 +47,7 @@ function LangToggle() {
 
 function AppContent() {
     const { token, error: authError, login, logout } = useGoogleAuth();
-    const { snapshot, modifiedTime, accounts, selectedId, loading, error: driveError, refresh, switchAccount, deleteAccount } = useDriveData(token);
+    const { snapshot, avatars, modifiedTime, accounts, selectedId, loading, error: driveError, refresh, switchAccount, deleteAccount } = useDriveData(token);
     const { t } = useLanguage();
 
     // Auto-logout when Drive token is expired or invalid (401)
@@ -127,6 +127,7 @@ function AppContent() {
     return (
         <Dashboard
             snapshot={snapshot}
+            avatars={avatars}
             modifiedTime={modifiedTime}
             accounts={accounts}
             selectedId={selectedId}

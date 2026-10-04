@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-02-05 01:19:16",
+  "full_map": {
+    "alice": { "username": "alice", "full_name": "Alice Example", "pic": "https://example.invalid/alice.jpg" },
+    "bob": { "username": "bob", "full_name": "Bob Example", "pic": "https://example.invalid/bob.jpg" },
+    "carol": { "username": "carol", "full_name": "Carol Example", "pic": "https://example.invalid/carol.jpg" },
+    "dave": { "username": "dave", "full_name": "Dave Example", "pic": "https://example.invalid/dave.jpg" },
+    "erin": { "username": "erin", "full_name": "", "pic": "https://example.invalid/erin.jpg" }
+  },
+  "followers_list": ["alice", "bob", "carol", "erin"],
+  "following_list": ["alice", "dave"],
+  "stats": {
+    "lost": [],
+    "not_back": ["dave"],
+    "new": ["alice", "bob", "carol", "erin"],
+    "fans": ["bob", "carol", "erin"]
+  }
+}

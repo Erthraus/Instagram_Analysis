@@ -12,7 +12,10 @@ const IG_APP_ID          = "936619743392459";
 const PAGE_DELAY         = { min: 2000, max: 3500 };
 const PHASE_DELAY        = 5000;
 const POST_DELAY         = { min: 1500, max: 2500 };
-const CHECKPOINT_VERSION = 5;   // Snapshot şeması değiştiğinde artır — temiz fetch zorlar
+const CHECKPOINT_VERSION = 6;   // Snapshot şeması değiştiğinde artır — temiz fetch zorlar (v3 = 6)
+
+const LOG = (...args) => console.log("[ig-analytics]", ...args);
+const LOGE = (...args) => console.error("[ig-analytics]", ...args);
 
 // ── Inline IndexedDB (content scriptler ES modül import'u kullanamaz) ─────────
 
@@ -75,16 +78,25 @@ async function fetchPaginated(urlFn, csrfToken, dataKey = "users") {
     const results = [];
     let cursor = null, attempt = 0, pages = 0;
     do {
-        const res = await fetchWithTimeout(urlFn(cursor), { headers: igHeaders(csrfToken), credentials: "include" });
+        const url = urlFn(cursor);
+        LOG("fetchPaginated →", url);
+        const res = await fetchWithTimeout(url, { headers: igHeaders(csrfToken), credentials: "include" });
+        LOG("fetchPaginated ← status", res.status, "page", pages + 1);
         if (res.status === 429 || res.status === 401) {
             if (++attempt > 3) throw new Error(`Hız sınırı aşıldı (HTTP ${res.status})`);
             const wait = Math.pow(2, attempt) * 5000;
+            LOG("rate-limited; backing off", wait, "ms");
             sendProgress("rate_limit", `${wait/1000}s`);
             await sleep(wait); continue;
         }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+            LOGE("HTTP not ok:", res.status, await res.text().catch(() => "<no body>"));
+            throw new Error(`HTTP ${res.status}`);
+        }
         const ct = res.headers.get("content-type") || "";
         if (!ct.includes("json")) {
+            const sample = await res.text().catch(() => "<no body>");
+            LOGE("Beklenmedik content-type:", ct, "body sample:", sample.slice(0, 200));
             throw new Error(`Beklenmedik yanıt (${ct}). Instagram güvenlik kontrolü istiyor olabilir — instagram.com'u ziyaret et.`);
         }
         const data = await res.json();
@@ -95,6 +107,7 @@ async function fetchPaginated(urlFn, csrfToken, dataKey = "users") {
         sendProgress("fetching", `${results.length} (${pages}. sayfa)`);
         if (cursor) await jitter();
     } while (cursor && pages < MAX_PAGINATED_PAGES);
+    LOG("fetchPaginated done — total:", results.length);
     return results;
 }
 
@@ -347,7 +360,9 @@ const mapUser = u => ({
 // ── Ana Analiz ────────────────────────────────────────────────────────────────
 
 async function runAnalysis() {
+    LOG("runAnalysis: starting");
     const { csrfToken, userId } = getInstagramAuth();
+    LOG("runAnalysis: auth ok, userId =", userId);
 
     let cp = await DB.get("sync_checkpoint");
     if (cp && (cp.userId !== userId || cp.version !== CHECKPOINT_VERSION)) cp = null;
@@ -430,10 +445,16 @@ async function runAnalysis() {
 
 // ── Mesaj Dinleyici ───────────────────────────────────────────────────────────
 
+LOG("content script loaded");
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === "RUN_ANALYSIS") {
+        LOG("RUN_ANALYSIS received");
         sendResponse({ ok: true, started: true }); // Hemen ACK gönder
-        runAnalysis().catch(err => chrome.runtime.sendMessage({ type: "ANALYSIS_ERROR", error: err.message }).catch(() => {}));
+        runAnalysis().catch(err => {
+            LOGE("runAnalysis failed:", err);
+            chrome.runtime.sendMessage({ type: "ANALYSIS_ERROR", error: err.message }).catch(() => {});
+        });
         return false;
     }
     if (message.type === "CHECK_ACCOUNT_STATUS") {

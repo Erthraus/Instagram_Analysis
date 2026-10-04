@@ -4,10 +4,11 @@ const I18N = {
     tr: {
         syncStart:       "Instagram'a bağlanılıyor...",
         forceStart:      "⚡ Zorla sync başlatılıyor...",
-        fetchFollowers:  "Takipçiler çekiliyor...",
+        fetchFollowers:  "Content script bekleniyor... (instagram.com sekmesi açık olmalı)",
         noData:          "Henüz veri yok. Sync'e bas.",
         syncFail:        "Sync başarısız.",
         noUsers:         "Bu kategoride kullanıcı yok.",
+        firstSyncEmpty:  "İlk sync'te değişim verisi olmaz — bir sonraki sync'te buraya gelecek.",
         engEmpty:        "Etkileşim verisi yok. Bir sonraki sync'te analiz edilecek.",
         ghostLabel:      "hayalet takipçi",
         topTitle:        "♥ En Çok Etkileşim",
@@ -15,6 +16,7 @@ const I18N = {
         lastSyncNever:   "Son sync: hiç",
         lastSyncPrefix:  "Son sync:",
         forceTip:        "Cooldown'ı atla (geliştirici)",
+        importTip:       "Eski veri dosyasını içe aktar",
         syncTimeout:     "Senkronizasyon zaman aşımına uğradı. Tekrar deneyin.",
         // card labels
         cardLost:        "Takipten Çıkan",
@@ -52,10 +54,11 @@ const I18N = {
     en: {
         syncStart:       "Connecting to Instagram...",
         forceStart:      "⚡ Force sync starting...",
-        fetchFollowers:  "Fetching followers...",
+        fetchFollowers:  "Waiting for content script... (instagram.com tab must be open)",
         noData:          "No data yet. Press Sync.",
         syncFail:        "Sync failed.",
         noUsers:         "No users in this category.",
+        firstSyncEmpty:  "No change data on first sync — will appear after the next sync.",
         engEmpty:        "No engagement data. Will be analyzed on next sync.",
         ghostLabel:      "ghost followers",
         topTitle:        "♥ Top Engagement",
@@ -63,6 +66,7 @@ const I18N = {
         lastSyncNever:   "Last sync: never",
         lastSyncPrefix:  "Last sync:",
         forceTip:        "Bypass cooldown (dev)",
+        importTip:       "Import a legacy data file",
         syncTimeout:     "Sync timed out. Please try again.",
         // card labels
         cardLost:        "Unfollowers",
@@ -123,6 +127,7 @@ function applyLanguage() {
     // authMsg is a static string (not user data), safe to use innerHTML
     document.getElementById("auth-message").innerHTML = t("authMsg");
     document.getElementById("btn-force-sync").title = t("forceTip");
+    document.getElementById("btn-import").title = t("importTip");
 
     const footer = document.getElementById("last-sync-text");
     if (footer.dataset.never === "true") footer.textContent = t("lastSyncNever");
@@ -314,6 +319,11 @@ async function startSync(force = false) {
 btnSync.addEventListener("click",      () => startSync(false));
 btnForceSync.addEventListener("click", () => startSync(true));
 
+// The import page opens in its own tab: a file picker would close this popup.
+document.getElementById("btn-import").addEventListener("click", () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL("import/import.html") });
+});
+
 // ── Tab buttons ───────────────────────────────────────────────────────────────
 
 document.querySelectorAll(".tab-btn").forEach(btn => {
@@ -418,6 +428,18 @@ function showResults(stats) {
     const ghostEl = document.getElementById("count-ghost");
     if (ghostEl) ghostEl.textContent = stats.engagement_summary?.ghost_count ?? "—";
 
+    // If the currently-selected tab is empty (e.g. first sync — lost/new have no
+    // diff yet), auto-select the first non-empty tab so the user sees data.
+    if ((stats[currentCategory] || []).length === 0) {
+        const fallback = ["lost", "new", "fans", "not_back", "deactivated"]
+            .find(c => (stats[c] || []).length > 0);
+        if (fallback) {
+            currentCategory = fallback;
+            document.querySelectorAll(".tab-btn").forEach(b =>
+                b.classList.toggle("active", b.dataset.category === fallback));
+        }
+    }
+
     renderList(currentCategory, stats);
     showView(viewResults);
 }
@@ -434,7 +456,10 @@ function renderList(category, stats) {
     if (users.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-list";
-        empty.textContent = t("noUsers");
+        // For diff-based categories (lost/new), explain why they're empty on first sync
+        empty.textContent = (category === "lost" || category === "new")
+            ? t("firstSyncEmpty")
+            : t("noUsers");
         userList.appendChild(empty);
         return;
     }

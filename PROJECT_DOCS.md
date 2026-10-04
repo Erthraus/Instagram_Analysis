@@ -2,11 +2,13 @@
 
 ## 1. Executive Summary
 
-A decentralized Instagram analytics platform that tracks follower/following asymmetries, detects frozen/deleted accounts, and monitors audience changes over time. Risky operations (scraping, session management) are performed either through the user's own browser (Chrome Extension) or their desktop app — never on a central server. Data is stored encrypted and isolated in the user's own Google Drive. This eliminates server costs and removes the project from the scope of data protection regulations (GDPR/KVKK).
+A decentralized Instagram analytics platform that tracks follower/following asymmetries, detects frozen/deleted accounts, and monitors audience changes over time. Risky operations (scraping, session management) are performed in the user's own browser (Chrome Extension) — never on a central server. Data is stored gzip-compressed in an app-private folder of the user's own Google Drive; the app adds no encryption of its own beyond what Drive provides. This eliminates server costs and removes the project from the scope of data protection regulations (GDPR/KVKK).
 
 ---
 
 ## 2. System Architecture (3-Tier)
+
+> **Note:** the Python desktop app (`insta_flet.py`) was removed from the repository. It still appears below and in the feature matrix because its data file (schema v0) can be imported as a baseline — see 4.6.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -87,8 +89,10 @@ For each user in `lost`, after comparing snapshots:
    └─ Profile loads normally → "active" (truly unfollowed)
 
 2. Classification carries forward to next run (no re-checking stable entries)
-3. If newly_lost > 50: process first 50, defer rest to next run
-4. Sleep 2.5–4.0 seconds between each check (rate limit protection)
+3. At most 200 checks are queued per sync; they run in batches of 40 per alarm
+4. Sleep 3–5 seconds between each check (rate limit protection)
+5. If the check itself fails (rate limit, network) the result is "unknown" and
+   the user is left unchanged — they stay under "Unfollowers"
 ```
 
 **Why this matters:** Without this check, a deactivated account would appear in the "Unfollowers" tab — a false positive. This separates intentional unfollows from account deactivations.
@@ -104,6 +108,23 @@ Sent requests are scraped from DOM / internal API. Compared to previous snapshot
 User's last N posts + 24h stories are scanned. Likes, comments, story views are mapped to follower IDs:
 - High interaction → "Loyal Followers"
 - Zero interaction → "Ghost Followers"
+
+### 4.6 Retroactive Diff from a Legacy File
+*(Chrome Extension only)*
+
+The old desktop app wrote a `<username>_data.json` file (schema v0). The extension can use it as a one-time baseline:
+
+```
+1. Popup → "⇪" → import page → choose the file
+   (validated, reduced to follower/following usernames + names, kept in chrome.storage.local)
+2. Next sync: applyLegacyBaseline(snapshot, baseline)
+   ├─ baseline follower, not a follower now  → follower_lost   event
+   ├─ follower now, not in the baseline      → follower_gained event
+   └─ events carry `since: <baseline date>` and are skipped if already recorded
+3. After the snapshot is saved to Drive the local baseline copy is deleted
+```
+
+Limits: v0 has no numeric ids, so matching is by username — someone who renamed their account shows up as one lost plus one gained. If fewer than 30% of the baseline's followers still follow, the file is treated as belonging to another account and ignored. The Unfollowers tab shows changes since the previous sync, so the retroactive list is visible until the sync after it (the events stay in the log).
 
 ---
 
@@ -135,35 +156,90 @@ const { ds_user_id: userId, csrftoken: csrfToken } = cookies;
 
 ---
 
-## 6. Data Format: Analytics_Snapshot.json
+## 6. Data Format: Analytics_Snapshot_{userId}.json (schema v3)
+
+### v3 schema
 
 ```json
 {
-  "timestamp": "2026-03-27 14:30:00",
-  "full_map": {
-    "username123": {
-      "username": "username123",
-      "full_name": "Display Name",
-      "pk": "123456789"
+  "schema_version": 3,
+  "snapshot_at": "2026-05-14T13:00:00.000Z",
+  "account": { "pk": "1234567", "username": "...", "full_name": "..." },
+  "client": { "name": "chrome_extension", "version": "1.1.0" },
+
+  "users": {
+    "<pk>": {
+      "username": "...",
+      "full_name": "...",
+      "profile_pic_url": "<expiring CDN url>",
+      "is_verified": false,
+      "flags": {
+        "is_follower":  true,
+        "is_following": true,
+        "is_pending":   false,
+        "is_requester": false
+      },
+      "lifecycle": {
+        "first_seen_at":    "2026-01-01T00:00:00.000Z",
+        "last_seen_at":     "2026-05-14T13:00:00.000Z",
+        "status":           "active",
+        "status_checked_at": null
+      },
+      "engagement": {
+        "post_likes": 0, "story_views": 0, "story_likes": 0, "score": 0,
+        "last_updated_at": null
+      }
     }
   },
-  "followers_list": ["username1", "username2"],
-  "following_list": ["username1", "username3"],
-  "history": [
-    { "timestamp": "2026-03-20 10:00:00", "follower_count": 1240 },
-    { "timestamp": "2026-03-27 14:30:00", "follower_count": 1255 }
+
+  "events": [
+    { "ts": "...", "type": "follower_gained",  "pk": "..." },
+    { "ts": "...", "type": "follower_lost",    "pk": "..." },
+    { "ts": "...", "type": "status_changed",   "pk": "...", "from": "active", "to": "deactivated" },
+    { "ts": "...", "type": "request_withdrawn","pk": "..." }
   ],
-  "stats": {
-    "lost":        ["username_a"],
-    "not_back":    ["username_b"],
-    "new":         ["username_c"],
-    "fans":        ["username_d"],
-    "deactivated": ["username_e"]
+
+  "history": [
+    { "ts": "...", "follower_count": 1240, "following_count": 760 }
+  ],
+
+  "metadata": {
+    "last_full_sync_at":    "...",
+    "previous_snapshot_at": "...",
+    "sync_count":           42
   }
 }
 ```
 
-> **Note:** Profile picture URLs (`pic`) are NOT stored in Drive — Instagram CDN URLs contain expiring tokens (`oe=` parameter, expires 24–48h). Only `pk`, `username`, and `full_name` are persisted.
+**Design rationale:**
+- **Single source of truth.** Categories like `lost`, `new`, `fans`, `not_back`, `deactivated` are **not stored**. They are derived from `users[pk].flags` and `events` by `utils/derive.js`. This eliminates the 3-4× duplication of user data that existed in v2.
+- **Lifecycle.** `first_seen_at`/`last_seen_at`/`status`/`status_checked_at` per user enables long-term analytics ("longest-standing follower", "frozen since when").
+- **Event log.** Append-only `events` array (capped at 5000) keeps the historical record of follow/unfollow/status changes. Powers premium "trend over time" features.
+- **History cap.** 365 entries (was 30) — enough for a year of daily follower-count points.
+- **Schema versioning.** Every snapshot carries `schema_version`. Older formats are auto-migrated on read by `utils/migrate.js`.
+
+### Companion files
+
+| File | Purpose |
+|------|---------|
+| `Analytics_Snapshot_{userId}.json` | Main v3 snapshot (gzip-compressed) |
+| `Analytics_Backup_{userId}.json`   | Rolling 1-snapshot backup (previous version, gzipped) — created before each overwrite |
+| `Avatars_{userId}.json`            | `{ pk: dataURI }` — base64 profile pictures, kept separate so they don't bloat the main snapshot. Best-effort: if missing, the extension re-fetches on next sync. |
+
+> Profile pictures live in `Avatars_*.json` (not in the main snapshot) so the snapshot stays well under Drive's 10 MB appDataFolder limit even for accounts with thousands of followers.
+
+### Legacy schemas + auto-migration
+
+`utils/migrate.js` transparently migrates older formats to v3 on read:
+
+| Detected | Source format | Migration notes |
+|----------|---------------|----------------|
+| **v0** | Python desktop `<username>_data.json` — `full_map` keyed by *username*, `pic` is an expired CDN URL, `followers_list`/`following_list` are username arrays, no `pk`. | Each user becomes `users["legacy:<username>"]`. Expired `pic` is dropped. The next real sync produces pk-keyed entries; `reconcileLegacyUsernames()` then folds `legacy:*` into the matching real pk (preserving the earliest `first_seen_at`). |
+| **v1** | Early Chrome Extension format with explicit `followers`/`following` arrays + `pk`-keyed `full_map`. | Flags derived from the arrays; lifecycle/engagement initialized to defaults. |
+| **v2** | Current Chrome Extension format with `is_follower`/`is_following` inside `full_map`, plus enriched stats lists. | Direct field mapping; stats lists become `events`; `requests.pending` → `flags.is_pending`. |
+| **v3** | No migration needed. | Returned as-is. |
+
+Migration is **lazy on read** (any consumer that calls `loadSnapshot()` gets a v3 object back) and **eager on write** (the next sync overwrites with native v3). Detection is purely structural — no field has to be added to old snapshots before reading them.
 
 ---
 
@@ -175,14 +251,19 @@ chrome_extension/
 ├── background.js          # Service worker: message router, Drive API calls, alarms
 ├── popup/
 │   ├── popup.html         # Static shell with 5 category tabs
-│   ├── popup.js           # Reads IndexedDB, dispatches messages, renders counts
+│   ├── popup.js           # Reads diff_result from chrome.storage.local, renders counts
 │   └── popup.css          # Dark theme, card styles
 ├── content/
 │   └── instagram.js       # Instagram API calls inside page context
+├── import/
+│   ├── import.html        # Legacy data file import (opens in its own tab)
+│   └── import.js
 └── utils/
-    ├── analyzer.js        # Pure diff functions — unit-testable in Node.js
-    ├── drive.js           # Google Drive upsert/read (appDataFolder)
-    └── storage.js         # IndexedDB wrapper (current + previous snapshots)
+    ├── analyzer.js        # buildSnapshot / applyStatusChecks / applyLegacyBaseline — pure, unit-testable
+    ├── migrate.js         # v0/v1/v2 → v3 transparent schema migration
+    ├── derive.js          # Compute stats/engagement from a v3 snapshot
+    ├── drive.js           # Google Drive upsert/read + avatars side-file
+    └── storage.js         # IndexedDB wrapper (sync checkpoint, etc.)
 ```
 
 ### Required Permissions (manifest.json)
@@ -202,7 +283,7 @@ chrome_extension/
 
 ### Rate Limiting Strategy
 - Followers fetch → **30 second pause** → Following fetch
-- Deactivated checks: scheduled via `chrome.alarms` **5 minutes after** main analysis
+- Deactivated checks: scheduled via `chrome.alarms` **5 minutes after** main analysis, in batches of 40
 - On HTTP 429 or 401: exponential backoff — `2^attempt × 5000ms`, max 3 retries
 - Last-run timestamp stored in `chrome.storage.local`; block re-run if < 30 minutes elapsed
 
@@ -293,30 +374,36 @@ Token + snapshot → <Dashboard> (5 tabs: Lost, Not Back, New, Fans, Frozen/Dele
 - Google Drive appDataFolder sync
 - IndexedDB local cache
 
-### Phase 2 — Planned
+### Phase 2 — Done ✅
 - React web client
 - Google OAuth login
-- Drive data viewer (5-tab dashboard)
+- Drive data viewer (7-tab dashboard)
 - Follower history chart (recharts)
-
-### Phase 3 — Future
-- Mobile app (React Native / Flutter)
-- Interaction analytics (ghost/loyal follower scoring)
+- Engagement scoring (ghost / loyal followers)
 - Pending follow request tracking
+- JSON export
+
+### Phase 3 — In Progress
+- Schema v3 migration (single source of truth, event log, lifecycle)
+- Profile picture separation (`Avatars_{userId}.json`)
+- Rolling backup (`Analytics_Backup_{userId}.json`)
+- 365-day follower history
+- Retroactive diff from a legacy v0 file (import page)
+
+### Phase 4 — Future
+- Mobile app / PWA
 - CSV / Excel export
 - Push notifications for follower changes
+- Per-post engagement breakdown
+- Premium tier (extended history, multi-account, exports)
 
 ---
 
 ## 12. Setup & Development
 
-### Python Desktop App
+### Tests
 ```bash
-cd Instagram_Analysis
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python insta_flet.py
+npm test           # node --test tests/*.test.js — no install needed (Node 20+)
 ```
 
 ### Chrome Extension (Local)

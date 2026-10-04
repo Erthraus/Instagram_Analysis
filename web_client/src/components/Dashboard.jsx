@@ -4,10 +4,11 @@ import { EngagementTab } from "./EngagementTab.jsx";
 import { RequestsTab } from "./RequestsTab.jsx";
 import { Chart } from "./Chart.jsx";
 import { useLanguage } from "../i18n/index.js";
+import { deriveStats, deriveEngagement } from "../utils/derive.js";
 
-export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, onSwitchAccount, onDeleteAccount, onLogout, onRefresh }) {
+export function Dashboard({ snapshot, avatars = {}, modifiedTime, accounts = [], selectedId, onSwitchAccount, onDeleteAccount, onLogout, onRefresh }) {
     const [activeTab, setActiveTab] = useState("lost");
-    const [confirmDelete, setConfirmDelete] = useState(null); // { id, username }
+    const [confirmDelete, setConfirmDelete] = useState(null);
     const { t, lang, toggle } = useLanguage();
 
     const TABS = [
@@ -20,68 +21,81 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
         { key: "requests",    label: t("tabRequests"),    color: "#f783ac" },
     ];
 
-    const stats      = snapshot?.stats      || {};
-    const history    = snapshot?.history    || [];
-    const engagement = snapshot?.engagement || {};
-    const fullMap    = snapshot?.full_map   || {};
-    const requests   = snapshot?.requests   || {};
+    // Derive stats + engagement directly from v3 snapshot — single source of truth.
+    const stats = useMemo(() => snapshot ? deriveStats(snapshot) : {
+        lost: [], not_back: [], new: [], fans: [], deactivated: [], pending: [],
+    }, [snapshot]);
 
-    // Reconstruct followers/following from full_map if arrays are absent (new snapshot format).
-    // Old format had explicit arrays; new format uses is_follower/is_following flags in full_map.
-    const followers  = snapshot?.followers  || Object.values(fullMap).filter(u => u.is_follower);
-    const following  = snapshot?.following  || Object.values(fullMap).filter(u => u.is_following);
+    const engagementSummary = useMemo(
+        () => snapshot ? deriveEngagement(snapshot) : { ghost_count: 0, weights: {}, engagers: [] },
+        [snapshot]
+    );
 
-    // Enrich stat arrays with full_map data (profile_pic, is_verified)
-    function enrich(pks) {
-        if (!pks?.length) return [];
-        if (typeof pks[0] === "object") return pks; // Already enriched
-        return pks.map(pk => fullMap[pk] || { pk, username: pk, full_name: "" });
-    }
+    const history = snapshot?.history || [];
 
-    // Memoize tab counts to avoid re-iterating on every render
-    const tabCounts = useMemo(() => {
-        const counts = {};
-        for (const key of ["lost", "not_back", "new", "fans", "deactivated"]) {
-            counts[key] = (stats[key] || []).length;
+    // Attach avatar b64 to each user from the separate avatars file
+    const withAvatar = useCallback((u) => ({
+        ...u,
+        profile_pic_b64: avatars[u.pk] || null,
+    }), [avatars]);
+
+    const followers = useMemo(() => {
+        if (!snapshot?.users) return [];
+        return Object.entries(snapshot.users)
+            .filter(([, u]) => u.flags?.is_follower)
+            .map(([pk, u]) => withAvatar({ pk, ...flatten(u) }));
+    }, [snapshot, withAvatar]);
+
+    // Engagement map: pk → engagement (for legacy EngagementTab API)
+    const engagementMap = useMemo(() => {
+        if (!snapshot?.users) return {};
+        const map = {};
+        for (const [pk, u] of Object.entries(snapshot.users)) {
+            if (u.engagement?.score > 0 || u.flags?.is_follower) {
+                map[pk] = u.engagement || { post_likes: 0, story_views: 0, story_likes: 0, score: 0 };
+            }
         }
-        const getScore = v => v && typeof v === "object" ? (v.score ?? 0) : (v ?? 0);
-        counts.engagement = followers.filter(u => getScore(engagement[u.pk]) === 0).length;
-        counts.requests = (requests.pending?.length || 0);
-        return counts;
-    }, [stats, followers, engagement, requests]);
+        return map;
+    }, [snapshot]);
+
+    const tabCounts = useMemo(() => ({
+        lost:        stats.lost.length,
+        not_back:    stats.not_back.length,
+        new:         stats.new.length,
+        fans:        stats.fans.length,
+        deactivated: stats.deactivated.length,
+        engagement:  engagementSummary.ghost_count,
+        requests:    stats.pending.length,
+    }), [stats, engagementSummary]);
 
     // ── Data Export ──────────────────────────────────────────────────────────
     const handleExport = useCallback(() => {
-        const normalize = e => {
-            if (!e) return { post_likes: 0, story_views: 0, story_likes: 0, score: 0 };
-            if (typeof e === "number") return { post_likes: e, story_views: 0, story_likes: 0, score: e };
-            return { post_likes: e.post_likes ?? 0, story_views: e.story_views ?? 0, story_likes: e.story_likes ?? 0, score: e.score ?? 0 };
-        };
-
         const mapUsers = list => (list || []).map(u => ({
-            username: u.username, full_name: u.full_name || "", is_verified: !!u.is_verified,
+            username:    u.username,
+            full_name:   u.full_name || "",
+            is_verified: !!u.is_verified,
         }));
 
         const exportData = {
+            schema_version: snapshot?.schema_version,
             exported_at: new Date().toISOString(),
-            account: snapshot?.currentUser?.username || snapshot?.userId || "unknown",
+            account: snapshot?.account?.username || snapshot?.account?.pk || "unknown",
             follower_count: followers.length,
-            following_count: following.length,
+            following_count: Object.values(snapshot?.users || {}).filter(u => u.flags?.is_following).length,
             stats: {
-                lost: mapUsers(stats.lost),
-                not_back: mapUsers(stats.not_back),
-                new: mapUsers(stats.new),
-                fans: mapUsers(stats.fans),
+                lost:        mapUsers(stats.lost),
+                not_back:    mapUsers(stats.not_back),
+                new:         mapUsers(stats.new),
+                fans:        mapUsers(stats.fans),
                 deactivated: mapUsers(stats.deactivated),
             },
-            engagement: Object.entries(engagement)
-                .map(([pk, e]) => {
-                    const user = fullMap[pk];
-                    const n = normalize(e);
-                    return { username: user?.username || pk, ...n };
-                })
-                .filter(e => e.score > 0)
-                .sort((a, b) => b.score - a.score),
+            engagement: engagementSummary.engagers.map(u => ({
+                username:    u.username,
+                post_likes:  u.engagement?.post_likes ?? 0,
+                story_views: u.engagement?.story_views ?? 0,
+                story_likes: u.engagement?.story_likes ?? 0,
+                score:       u.engagement?.score ?? 0,
+            })),
             history,
         };
 
@@ -92,11 +106,14 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
         a.download = `ig_analytics_${exportData.account}_${new Date().toISOString().slice(0, 10)}.json`;
         a.click();
         URL.revokeObjectURL(url);
-    }, [snapshot, followers, following, stats, engagement, fullMap, history]);
+    }, [snapshot, followers, stats, engagementSummary, history]);
 
     const lastSync = modifiedTime
         ? new Date(modifiedTime).toLocaleString()
-        : snapshot?.timestamp ? new Date(snapshot.timestamp).toLocaleString() : "—";
+        : snapshot?.snapshot_at ? new Date(snapshot.snapshot_at).toLocaleString() : "—";
+
+    const activeUsers = (stats[activeTab] || []).map(withAvatar);
+    const pendingUsers = stats.pending.map(withAvatar);
 
     return (
         <div className="dashboard">
@@ -137,7 +154,6 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
                 </div>
             </header>
 
-            {/* Summary Cards */}
             <div className="summary-strip">
                 {TABS.map(tab => (
                     <div key={tab.key}
@@ -152,7 +168,6 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
 
             <Chart history={history} />
 
-            {/* Tab Nav */}
             <nav className="tab-nav">
                 {TABS.map(tab => (
                     <button key={tab.key}
@@ -165,20 +180,19 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
                 ))}
             </nav>
 
-            {/* Content */}
             {activeTab === "engagement" ? (
-                <EngagementTab followers={followers} engagement={engagement} />
+                <EngagementTab followers={followers} engagement={engagementMap} />
             ) : activeTab === "requests" ? (
                 <RequestsTab
-                    pending={enrich(requests.pending || [])}
-                    withdrawn={enrich(requests.withdrawn || [])}
-                    fullMap={fullMap}
+                    pending={pendingUsers}
+                    withdrawn={[]}
+                    fullMap={snapshot?.users || {}}
                 />
             ) : (
                 <CategoryList
-                    users={enrich(stats[activeTab])}
+                    users={activeUsers}
                     badge={activeTab === "deactivated" ? "frozen" : null}
-                    engagement={activeTab === "fans" ? engagement : null}
+                    engagement={activeTab === "fans" ? engagementMap : null}
                 />
             )}
 
@@ -186,7 +200,6 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
                 {t("lastUpdated")}: {lastSync} &bull; {t("dataStoredDrive")}
             </footer>
 
-            {/* Delete confirmation modal */}
             {confirmDelete && (
                 <div className="modal-overlay" onClick={() => setConfirmDelete(null)}>
                     <div className="modal-card" onClick={e => e.stopPropagation()}>
@@ -213,4 +226,19 @@ export function Dashboard({ snapshot, modifiedTime, accounts = [], selectedId, o
             )}
         </div>
     );
+}
+
+// Flatten a v3 user entry into the shape existing components expect.
+function flatten(u) {
+    return {
+        username:        u.username,
+        full_name:       u.full_name,
+        profile_pic_url: u.profile_pic_url,
+        is_verified:     u.is_verified,
+        is_follower:     !!u.flags?.is_follower,
+        is_following:    !!u.flags?.is_following,
+        is_pending:      !!u.flags?.is_pending,
+        status:          u.lifecycle?.status,
+        engagement:      u.engagement,
+    };
 }
