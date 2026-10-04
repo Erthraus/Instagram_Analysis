@@ -11,7 +11,7 @@
 
 | | |
 |---|---|
-| **Durum** | 🟢 Çalışıyor — eklenti gerçek Chrome + Instagram ile denendi (2026-10-04) |
+| **Durum** | 🟢 Çalışıyor — eklenti ve web arayüzü gerçek hesaplarla denendi (2026-10-04) |
 | **Son yapılan** | 2026-10-04 — Yerel iş repoya taşındı, 4 hata düzeltildi, eski veriyle geriye dönük takipçi farkı eklendi (PR #1 ile `main`'e birleştirildi) |
 | **Sıradaki adım** | Sonuçları web arayüzünde incele (bkz. Bölüm 3); istenirse Bölüm 5'teki açık konulardan devam et |
 | **Senden beklenen karar** | Instagram ayarlarından eski oturumları kapat ve Çöp Kutusu'nu boşalt (bkz. Bölüm 5, madde 2). |
@@ -148,7 +148,6 @@ cd web_client && npm run build && npm audit --omit=dev
 - Proje sahibi eklentiyi Chrome'da denedi: çalışıyor.
 - Eski `session_*` dosyası proje klasöründen Çöp Kutusu'na taşındı.
 - Web arayüzü yerelde açıldı (`http://localhost:5173`): giriş ekranı hatasız geliyor.
-  Google girişi sonrası ekranlar bu oturumda doğrulanmadı.
 
 ### 2026-10-04 (devam) — Web arayüzünde Google giriş hatası
 
@@ -165,4 +164,4 @@ Ek fayda: web arayüzünün aldığı erişim anahtarı artık YouTube ve Sheets
 
 **Doğrulama:** Giriş isteğinin adresi tarayıcıda yakalandı. Önce: `include_granted_scopes=true`.
 Sonra: `include_granted_scopes=false`, istenen izinler `openid profile email drive.appdata`.
-Gerçek Google hesabıyla giriş bu oturumda yapılmadı; proje sahibinin denemesi gerekiyor.
+Proje sahibi gerçek Google hesabıyla denedi: giriş çalışıyor (2026-10-04). PR #3 ile `main`'e birleştirildi.
