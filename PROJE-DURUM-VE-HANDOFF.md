@@ -11,10 +11,10 @@
 
 | | |
 |---|---|
-| **Durum** | 🟡 Kod hazır ve testleri geçiyor; gerçek Chrome + Instagram ile uçtan uca deneme bekliyor |
+| **Durum** | 🟢 Çalışıyor — eklenti gerçek Chrome + Instagram ile denendi (2026-10-04) |
 | **Son yapılan** | 2026-10-04 — Yerel iş repoya taşındı, 4 hata düzeltildi, eski veriyle geriye dönük takipçi farkı eklendi (PR #1 ile `main`'e birleştirildi) |
-| **Sıradaki adım** | Eklentiyi Chrome'a yükle → eski veri dosyasını içe aktar → Sync'e bas (bkz. Bölüm 4) |
-| **Senden beklenen karar** | Proje klasöründeki eski `session_*` dosyasını sil (bkz. Bölüm 5). |
+| **Sıradaki adım** | Sonuçları web arayüzünde incele (bkz. Bölüm 3); istenirse Bölüm 5'teki açık konulardan devam et |
+| **Senden beklenen karar** | Instagram ayarlarından eski oturumları kapat ve Çöp Kutusu'nu boşalt (bkz. Bölüm 5, madde 2). |
 
 ---
 
@@ -55,6 +55,11 @@ npm run build      # ya da yerelde denemek için: npm run dev
 ```
 Çalışması için `web_client/.env` içinde `VITE_GOOGLE_CLIENT_ID` olmalı (örnek: `.env.example`).
 
+Web arayüzü internette yayında değil; sadece bu bilgisayarda çalışır. `npm run dev` çalışırken
+tarayıcıda `http://localhost:5173` adresini aç ve eklentide kullandığın Google hesabıyla giriş yap.
+Eklenti penceresine göre fazlası: takipçi sayısı grafiği, etkileşim tablosu, bekleyen takip
+istekleri ve sonuçları JSON olarak dışa aktarma.
+
 **Chrome eklentisi:**
 1. Chrome'da `chrome://extensions` adresini aç, sağ üstten "Developer mode"u aç.
 2. "Load unpacked" → `chrome_extension/` klasörünü seç.
@@ -87,8 +92,8 @@ Bilinmesi gerekenler:
 
 | # | Konu | Önem | Not |
 |---|---|---|---|
-| 1 | Uçtan uca deneme yapılmadı | Yüksek | Mantık testlerle ve gerçek eski dosyayla yapılan simülasyonla doğrulandı; gerçek Chrome + Instagram + Drive akışı henüz denenmedi |
-| 2 | Proje klasöründe eski `session_*` dosyası duruyor | Yüksek | Eski Python uygulamasının Instagram oturum çerezi. Depoya girmiyor (`.gitignore`), ama artık kullanılmıyor: sil ve Instagram ayarlarından eski oturumları kapat |
+| 1 | Uçtan uca deneme kısmen yapıldı | Orta | Proje sahibi 2026-10-04'te gerçek Chrome + Instagram ile denedi, çalışıyor. Ayrıca doğrulanmayanlar: 40'tan uzun durum kontrolü listeleri, Drive kaydı başarısız olunca yeniden deneme |
+| 2 | Eski Instagram oturumu hâlâ geçerli olabilir | Orta | Eski Python uygulamasının `session_*` dosyası 2026-10-04'te proje klasöründen Çöp Kutusu'na taşındı. Dosyayı silmek oturumu iptal etmez: Instagram ayarlarından eski oturumları kapat, sonra Çöp Kutusu'nu boşalt |
 | 3 | "Çıkanlar" için tüm zamanlar görünümü yok | Orta | Sadece son Sync'ten beri olanlar listeleniyor; günlükteki eski kayıtları gösteren bir seçenek eklenebilir |
 | 4 | Vite / esbuild geliştirme sunucusu uyarısı | Düşük | Sadece `npm run dev` sırasında geçerli. Düzeltmesi Vite'ı 5'ten 8'e yükseltmeyi gerektiriyor (kırıcı değişiklik) |
 | 5 | Durum kontrolü başarısız olan hesaplar yeniden denenmiyor | Düşük | "Çıkanlar"da kalırlar; dondurulmuş olsalar bile ayrıştırılmaz |
@@ -135,3 +140,11 @@ cd web_client && npm run build && npm audit --omit=dev
 
 **Kalan**
 - Bölüm 5'teki 1 ve 2 numaralı maddeler.
+
+### 2026-10-04 (devam) — İlk gerçek deneme
+
+- Değişiklikler PR #1 ile `main`'e birleştirildi; yerel ve repo aynı commit'te.
+- Proje sahibi eklentiyi Chrome'da denedi: çalışıyor.
+- Eski `session_*` dosyası proje klasöründen Çöp Kutusu'na taşındı.
+- Web arayüzü yerelde açıldı (`http://localhost:5173`): giriş ekranı hatasız geliyor.
+  Google girişi sonrası ekranlar bu oturumda doğrulanmadı.
