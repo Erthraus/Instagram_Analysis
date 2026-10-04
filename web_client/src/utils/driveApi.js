@@ -1,12 +1,16 @@
 /**
  * driveApi.js — Google Drive appDataFolder access from the React web client.
- * Read-only + delete from web client — writing is done by the Chrome Extension.
+ * Read-only + delete from web client. Writing is done by the Chrome Extension.
  *
- * Hesap ayrımı: Her hesap kendi Analytics_Snapshot_{userId}.json dosyasında.
+ * All snapshots are migrated to v3 on read.
+ * Avatars live in a separate Avatars_{userId}.json file.
  */
 
-const DRIVE_BASE    = "https://www.googleapis.com/drive/v3";
-const FILE_PREFIX   = "Analytics_Snapshot_";
+import { migrate } from "./migrate.js";
+
+const DRIVE_BASE      = "https://www.googleapis.com/drive/v3";
+const SNAPSHOT_PREFIX = "Analytics_Snapshot_";
+const AVATARS_PREFIX  = "Avatars_";
 
 async function driveGet(token, url) {
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
@@ -14,10 +18,6 @@ async function driveGet(token, url) {
     return res.json();
 }
 
-/**
- * Decompress a gzip-compressed snapshot (v2 format).
- * Falls through for uncompressed (v1) snapshots.
- */
 async function maybeDecompress(data) {
     if (data && data.v === 2 && data.gz) {
         const binary = atob(data.gz);
@@ -33,12 +33,10 @@ async function maybeDecompress(data) {
 }
 
 /**
- * List all snapshot files in appDataFolder.
- * Returns [{ id, name, modifiedTime, userId }] sorted newest first.
- * Handles pagination for accounts with many snapshot files.
+ * List snapshot files (excluding backups and avatars). Newest first.
  */
 export async function listSnapshots(token) {
-    const q = encodeURIComponent(`name contains '${FILE_PREFIX}'`);
+    const q = encodeURIComponent(`name contains '${SNAPSHOT_PREFIX}'`);
     let allFiles = [];
     let pageToken = null;
 
@@ -50,17 +48,16 @@ export async function listSnapshots(token) {
         pageToken = json.nextPageToken || null;
     } while (pageToken);
 
-    return allFiles.map(f => ({
-        id:           f.id,
-        name:         f.name,
-        modifiedTime: f.modifiedTime,
-        userId:       f.name.replace(FILE_PREFIX, "").replace(".json", "")
-    }));
+    return allFiles
+        .filter(f => f.name.startsWith(SNAPSHOT_PREFIX))
+        .map(f => ({
+            id:           f.id,
+            name:         f.name,
+            modifiedTime: f.modifiedTime,
+            userId:       f.name.replace(SNAPSHOT_PREFIX, "").replace(".json", ""),
+        }));
 }
 
-/**
- * Delete a snapshot file from Drive by file ID.
- */
 export async function deleteSnapshot(token, fileId) {
     const res = await fetch(`${DRIVE_BASE}/files/${fileId}`, {
         method: "DELETE",
@@ -70,14 +67,34 @@ export async function deleteSnapshot(token, fileId) {
 }
 
 /**
- * Load a specific snapshot by Drive file ID.
- * Supports both compressed (v2) and uncompressed (v1) snapshots.
+ * Load a snapshot by Drive file ID. Migration to v3 happens transparently.
  */
 export async function loadSnapshotById(token, fileId) {
     const res = await fetch(`${DRIVE_BASE}/files/${fileId}?alt=media`, {
         headers: { Authorization: `Bearer ${token}` }
     });
     if (!res.ok) throw new Error(`Drive read failed: ${res.status}`);
-    const data = await res.json();
-    return maybeDecompress(data);
+    const raw = await res.json();
+    const decompressed = await maybeDecompress(raw);
+    return migrate(decompressed);
+}
+
+/**
+ * Load the avatars side-file for a given userId, if present.
+ * Returns { pk: dataURI } or null.
+ */
+export async function loadAvatars(token, userId) {
+    const name = `${AVATARS_PREFIX}${userId}.json`;
+    const q = encodeURIComponent(`name='${name}'`);
+    const url = `${DRIVE_BASE}/files?spaces=appDataFolder&q=${q}&fields=files(id)`;
+    const json = await driveGet(token, url);
+    const fileId = json.files?.[0]?.id;
+    if (!fileId) return null;
+    const res = await fetch(`${DRIVE_BASE}/files/${fileId}?alt=media`, {
+        headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) return null;
+    const raw = await res.json();
+    const decompressed = await maybeDecompress(raw);
+    return decompressed?.avatars || null;
 }

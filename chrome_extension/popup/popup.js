@@ -4,10 +4,11 @@ const I18N = {
     tr: {
         syncStart:       "Instagram'a bağlanılıyor...",
         forceStart:      "⚡ Zorla sync başlatılıyor...",
-        fetchFollowers:  "Takipçiler çekiliyor...",
+        fetchFollowers:  "Content script bekleniyor... (instagram.com sekmesi açık olmalı)",
         noData:          "Henüz veri yok. Sync'e bas.",
         syncFail:        "Sync başarısız.",
         noUsers:         "Bu kategoride kullanıcı yok.",
+        firstSyncEmpty:  "İlk sync'te değişim verisi olmaz — bir sonraki sync'te buraya gelecek.",
         engEmpty:        "Etkileşim verisi yok. Bir sonraki sync'te analiz edilecek.",
         ghostLabel:      "hayalet takipçi",
         topTitle:        "♥ En Çok Etkileşim",
@@ -52,10 +53,11 @@ const I18N = {
     en: {
         syncStart:       "Connecting to Instagram...",
         forceStart:      "⚡ Force sync starting...",
-        fetchFollowers:  "Fetching followers...",
+        fetchFollowers:  "Waiting for content script... (instagram.com tab must be open)",
         noData:          "No data yet. Press Sync.",
         syncFail:        "Sync failed.",
         noUsers:         "No users in this category.",
+        firstSyncEmpty:  "No change data on first sync — will appear after the next sync.",
         engEmpty:        "No engagement data. Will be analyzed on next sync.",
         ghostLabel:      "ghost followers",
         topTitle:        "♥ Top Engagement",
@@ -418,6 +420,18 @@ function showResults(stats) {
     const ghostEl = document.getElementById("count-ghost");
     if (ghostEl) ghostEl.textContent = stats.engagement_summary?.ghost_count ?? "—";
 
+    // If the currently-selected tab is empty (e.g. first sync — lost/new have no
+    // diff yet), auto-select the first non-empty tab so the user sees data.
+    if ((stats[currentCategory] || []).length === 0) {
+        const fallback = ["lost", "new", "fans", "not_back", "deactivated"]
+            .find(c => (stats[c] || []).length > 0);
+        if (fallback) {
+            currentCategory = fallback;
+            document.querySelectorAll(".tab-btn").forEach(b =>
+                b.classList.toggle("active", b.dataset.category === fallback));
+        }
+    }
+
     renderList(currentCategory, stats);
     showView(viewResults);
 }
@@ -434,7 +448,10 @@ function renderList(category, stats) {
     if (users.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty-list";
-        empty.textContent = t("noUsers");
+        // For diff-based categories (lost/new), explain why they're empty on first sync
+        empty.textContent = (category === "lost" || category === "new")
+            ? t("firstSyncEmpty")
+            : t("noUsers");
         userList.appendChild(empty);
         return;
     }

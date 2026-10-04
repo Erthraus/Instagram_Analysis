@@ -7,61 +7,61 @@
  *  3. Scheduled deactivated-account checks via chrome.alarms
  *  4. Rate limit enforcement (30-min cooldown between full syncs)
  *
- * Architecture notes:
- *  - Content script writes snapshot to chrome.storage.local (avoids message size limits)
- *  - SYNC_COMPLETE is sent BEFORE Drive save (popup shows results immediately)
- *  - Drive save runs in background; DRIVE_SAVE_COMPLETE/FAILED notify popup via toast
- *  - Interrupted Drive saves are retried on service worker restart
+ * Snapshot format: v3 (see utils/migrate.js).
+ * Profile picture base64 lives in a separate Avatars_{userId}.json file
+ * to keep the main snapshot under Drive's 10 MB limit. The popup loads
+ * avatars from chrome.storage.local; the web client loads them from Drive.
  */
 
-import { saveSnapshot, loadSnapshot } from "./utils/drive.js";
-import { computeDiff, applyStatusChecks, buildFullMap } from "./utils/analyzer.js";
+import { saveSnapshot, loadSnapshot, loadRawSnapshot, saveAvatars } from "./utils/drive.js";
+import { buildSnapshot, applyStatusChecks } from "./utils/analyzer.js";
+import { deriveStats, deriveEngagement } from "./utils/derive.js";
+import { reconcileLegacyUsernames, extractLegacyAvatars, migrate, STATUS } from "./utils/migrate.js";
 
 const ALARM_STATUS_CHECK        = "deactivated_status_check";
 const ALARM_DRIVE_RETRY         = "drive_save_retry";
-const MIN_SYNC_INTERVAL_MS      = 30 * 60 * 1000; // 30 minutes
-const MAX_STATUS_CHECKS_PER_RUN = 50;
-const FETCH_B64_TIMEOUT_MS      = 5_000;            // 5s per image
-const FETCH_B64_MAX_BYTES       = 2 * 1024 * 1024;  // 2 MB safety cap
+const MIN_SYNC_INTERVAL_MS      = 30 * 60 * 1000;
+const MAX_STATUS_CHECKS_PER_RUN = 200;  // was 50 — more aggressive resolution
+const FETCH_B64_TIMEOUT_MS      = 5_000;
+const FETCH_B64_MAX_BYTES       = 2 * 1024 * 1024;
 const DRIVE_RETRY_MAX           = 3;
 
-// ── Startup: retry any Drive save interrupted by service worker termination ────
+// ── Startup: retry any Drive save interrupted by service worker termination ─
 
 (async () => {
     try {
-        const data = await chrome.storage.local.get(["pending_drive_snapshot", "pending_drive_retry_count"]);
-        if (data.pending_drive_snapshot) {
+        const data = await chrome.storage.local.get(["pending_drive_snapshot", "pending_drive_retry_count", "pending_drive_userId"]);
+        if (data.pending_drive_snapshot && data.pending_drive_userId) {
             const retryCount = data.pending_drive_retry_count || 0;
             if (retryCount < DRIVE_RETRY_MAX) {
-                await saveToDriveInBackground(data.pending_drive_snapshot, [], data.pending_drive_snapshot.userId, retryCount);
+                await saveToDriveInBackground(data.pending_drive_snapshot, [], data.pending_drive_userId, retryCount);
             } else {
-                // Max retries reached — give up, clean up
-                await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count"]);
+                await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count", "pending_drive_userId"]);
             }
         }
     } catch { /* startup check failed — not critical */ }
 })();
 
-// ── Alarm Listener ────────────────────────────────────────────────────────────
+// ── Alarms ───────────────────────────────────────────────────────────────────
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (alarm.name === ALARM_STATUS_CHECK) {
         await runDeactivatedStatusChecks();
     }
     if (alarm.name === ALARM_DRIVE_RETRY) {
-        const data = await chrome.storage.local.get(["pending_drive_snapshot", "pending_drive_retry_count"]);
-        if (data.pending_drive_snapshot) {
+        const data = await chrome.storage.local.get(["pending_drive_snapshot", "pending_drive_retry_count", "pending_drive_userId"]);
+        if (data.pending_drive_snapshot && data.pending_drive_userId) {
             const retryCount = data.pending_drive_retry_count || 0;
             if (retryCount < DRIVE_RETRY_MAX) {
-                await saveToDriveInBackground(data.pending_drive_snapshot, [], data.pending_drive_snapshot.userId, retryCount);
+                await saveToDriveInBackground(data.pending_drive_snapshot, [], data.pending_drive_userId, retryCount);
             } else {
-                await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count"]);
+                await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count", "pending_drive_userId"]);
             }
         }
     }
 });
 
-// ── Message Router ────────────────────────────────────────────────────────────
+// ── Message Router ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
@@ -95,24 +95,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         case "ANALYSIS_COMPLETE": {
-            // Content script wrote the snapshot to chrome.storage.local (avoids message size limit).
-            // Read it from storage, process, then clean up.
             (async () => {
                 try {
                     const data = await chrome.storage.local.get(["analysis_snapshot"]);
-                    const snapshot = data.analysis_snapshot;
-                    if (!snapshot) {
+                    const scraped = data.analysis_snapshot;
+                    if (!scraped) {
                         throw new Error("Snapshot verisi bulunamadı. Content script yazamadı olabilir.");
                     }
-                    await handleAnalysisComplete(snapshot);
+                    await handleAnalysisComplete(scraped);
                     sendResponse({ ok: true });
                 } catch (err) {
-                    // Ensure popup is notified of ANY error during processing
                     await chrome.storage.local.set({ sync_in_progress: false, sync_heartbeat: null }).catch(() => {});
                     chrome.runtime.sendMessage({ type: "SYNC_ERROR", error: err.message }).catch(() => {});
                     sendResponse({ ok: false, error: err.message });
                 } finally {
-                    // Clean up the transfer payload regardless of success/failure
                     chrome.storage.local.remove(["analysis_snapshot"]).catch(() => {});
                 }
             })();
@@ -120,14 +116,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         case "ANALYSIS_PROGRESS": {
-            // Write heartbeat to storage — popup reads this as fallback if sendMessage is dropped
             chrome.storage.local.set({
                 sync_heartbeat:    Date.now(),
                 sync_in_progress:  true,
                 sync_last_step:    message.step,
                 sync_last_detail:  message.detail || ""
             });
-            // Forward to popup if open
             chrome.runtime.sendMessage({ type: "PROGRESS_UPDATE", step: message.step, detail: message.detail })
                 .catch(() => {});
             return false;
@@ -142,7 +136,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 });
 
-// ── Sync Handler ──────────────────────────────────────────────────────────────
+// ── Sync Handler ─────────────────────────────────────────────────────────────
 
 async function handleRunSync(tabId, force = false) {
     if (!force) {
@@ -158,7 +152,6 @@ async function handleRunSync(tabId, force = false) {
         throw new Error("Sync başlatmadan önce bir sekmede instagram.com'u açın.");
     }
 
-    // Fire-and-forget: content script ACKs immediately, sends ANALYSIS_COMPLETE later.
     chrome.tabs.sendMessage(igTab, { type: "RUN_ANALYSIS" }).catch(() => {});
     await chrome.storage.local.set({ last_run_time: Date.now() });
 }
@@ -168,14 +161,23 @@ async function getInstagramTabId() {
     return tabs[0]?.id || null;
 }
 
-// ── Fetch image as base64 ─────────────────────────────────────────────────────
+// ── Fetch image as base64 ────────────────────────────────────────────────────
 
 async function fetchAsBase64(url) {
     try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), FETCH_B64_TIMEOUT_MS);
-        const res = await fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
-        if (!res.ok) return null;
+        // Instagram CDN: must NOT send our extension origin as referrer.
+        const res = await fetch(url, {
+            signal: controller.signal,
+            referrerPolicy: "no-referrer",
+            credentials: "omit",
+            mode: "cors",
+        }).finally(() => clearTimeout(timer));
+        if (!res.ok) {
+            console.warn("[ig-analytics] avatar fetch HTTP", res.status, url.slice(0, 80));
+            return null;
+        }
 
         const reader = res.body?.getReader();
         if (!reader) {
@@ -196,7 +198,10 @@ async function fetchAsBase64(url) {
         let offset = 0;
         for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
         return encodeArrayBuffer(buffer.buffer, res.headers.get("content-type"));
-    } catch { return null; }
+    } catch (err) {
+        console.warn("[ig-analytics] avatar fetch error:", err.message);
+        return null;
+    }
 }
 
 function encodeArrayBuffer(buffer, contentType) {
@@ -208,209 +213,135 @@ function encodeArrayBuffer(buffer, contentType) {
     return `data:${contentType || "image/jpeg"};base64,${btoa(binary)}`;
 }
 
-// ── Snapshot normalizer (backward compat) ─────────────────────────────────────
-// Old Drive snapshots have followers/following arrays.
-// New snapshots omit them and use is_follower/is_following flags in full_map.
+// ── Analysis Complete Handler ────────────────────────────────────────────────
 
-function normalizeDriveSnapshot(driveSnapshot) {
-    if (!driveSnapshot) return null;
-    if (Array.isArray(driveSnapshot.followers)) return driveSnapshot;
-    const map = driveSnapshot.full_map || {};
-    return {
-        ...driveSnapshot,
-        followers: Object.values(map).filter(u => u.is_follower),
-        following: Object.values(map).filter(u => u.is_following)
-    };
-}
-
-// ── Analysis Complete Handler ─────────────────────────────────────────────────
-
-async function handleAnalysisComplete(newSnapshot) {
+async function handleAnalysisComplete(scraped) {
     const sendProgress = (detail) =>
         chrome.runtime.sendMessage({ type: "PROGRESS_UPDATE", step: "saving", detail }).catch(() => {});
 
     sendProgress("Önceki veriler yükleniyor...");
 
-    // Load previous snapshot from Drive — graceful fallback if Drive is unreachable.
-    // A Drive failure should NOT prevent the user from seeing their current data.
-    let driveSnapshot = null;
+    // Load raw first so we can recover any legacy b64 avatars before migrate drops them.
+    let rawPrev = null;
     try {
-        driveSnapshot = await loadSnapshot(newSnapshot.userId);
+        rawPrev = await loadRawSnapshot(scraped.userId);
     } catch {
-        // Drive unreachable — continue as if first run.
-        // The diff will show no lost/new users, which is correct for a first run.
+        // Drive unreachable — treat as first run.
+    }
+    const prevSnapshot = migrate(rawPrev);
+    const legacyAvatars = extractLegacyAvatars(rawPrev);
+    if (Object.keys(legacyAvatars).length > 0) {
+        console.log(`[ig-analytics] Recovered ${Object.keys(legacyAvatars).length} legacy avatars from old snapshot`);
     }
 
-    // Normalize old-format snapshots so computeDiff always has followers/following arrays
-    const normalizedDriveSnapshot = normalizeDriveSnapshot(driveSnapshot);
+    sendProgress("Snapshot oluşturuluyor...");
 
-    sendProgress("Diff hesaplanıyor...");
+    const { snapshot, pendingStatusChecks } = buildSnapshot(prevSnapshot, scraped);
 
-    // Compute diff
-    const diff = computeDiff(normalizedDriveSnapshot, newSnapshot);
+    // Fold leftover legacy:<username> entries from v0 migration into matching pks
+    if (prevSnapshot?.metadata?.legacy_v0) {
+        snapshot.users = reconcileLegacyUsernames(snapshot.users);
+    }
 
-    // Build full_map (pk → user info) with is_follower/is_following flags
-    const previousMap = driveSnapshot?.full_map || {};
-    const fullMap = buildFullMap(newSnapshot.followers, newSnapshot.following, previousMap);
+    // ── Fetch profile pictures (cached locally; ALSO synced to Drive) ────────
+    const localAvatars = (await chrome.storage.local.get(["avatars_" + scraped.userId]))["avatars_" + scraped.userId] || {};
+    // Merge order: recovered legacy < local cache (local is most recent on re-run)
+    const avatarsMap = { ...legacyAvatars, ...localAvatars };
 
-    // Collect users that need status checking (newly lost)
-    const pendingChecks = diff.lost
-        .filter(u => u.pendingStatusCheck)
-        .slice(0, MAX_STATUS_CHECKS_PER_RUN)
-        .map(u => ({ pk: u.pk, username: u.username }));
-
-    // Compute withdrawn follow requests
-    const prevPendingPks  = new Set((driveSnapshot?.requests?.pending   || []).map(u => String(u.pk || u)));
-    const currPendingPks  = new Set((newSnapshot.requests?.pending      || []).map(u => String(u.pk || u)));
-    const currFollowerPks = new Set(newSnapshot.followers.map(u => String(u.pk)));
-
-    const newlyWithdrawn = [...prevPendingPks]
-        .filter(pk => !currPendingPks.has(pk) && !currFollowerPks.has(pk))
-        .map(pk => {
-            const prev = (driveSnapshot?.requests?.pending || []).find(u => String(u.pk || u) === pk);
-            return prev || { pk };
-        });
-
-    const allWithdrawn = [...(driveSnapshot?.requests?.withdrawn || []), ...newlyWithdrawn]
-        .filter((u, i, arr) => arr.findIndex(x => String(x.pk || x) === String(u.pk || u)) === i);
-
-    // Build snapshot — WITHOUT followers/following arrays (redundant with full_map flags).
-    // This halves the Drive file size for large accounts.
-    const snapshotToSave = {
-        timestamp:   newSnapshot.timestamp,
-        userId:      newSnapshot.userId,
-        currentUser: newSnapshot.currentUser || null,
-        full_map:    fullMap,
-        history:     buildHistory(driveSnapshot, {
-            follower_count:  newSnapshot.followers.length,
-            following_count: newSnapshot.following.length,
-        }),
-        engagement:  newSnapshot.engagement || {},
-        requests: {
-            pending:   newSnapshot.requests?.pending   || [],
-            withdrawn: allWithdrawn
-        },
-        stats: {
-            lost:          diff.lost.filter(u => !u.pendingStatusCheck),
-            not_back:      diff.not_back,
-            new:           diff.newFollowers,
-            fans:          diff.fans,
-            deactivated:   diff.deactivated,
-            pending_check: pendingChecks
-        }
-    };
-
-    // Fetch ALL profile pics as base64 — previously cached pics are skipped.
-    const eng = snapshotToSave.engagement || {};
-    const getEng = (pk) => {
-        const v = eng[pk];
-        if (v && typeof v === "object") return v;
-        return { post_likes: 0, story_views: 0, story_likes: 0, score: typeof v === "number" ? v : 0 };
-    };
-
-    const allUserPks = Object.keys(fullMap);
-    const picsToFetch = allUserPks
-        .filter(pk => fullMap[pk]?.profile_pic_url && !fullMap[pk]?.profile_pic_b64);
+    // Only fetch pics for users we'll display (followers, fans, lost, pending, deactivated, engagers)
+    const displayPks = new Set();
+    for (const [pk, u] of Object.entries(snapshot.users)) {
+        if (u.flags.is_follower || u.flags.is_following || u.flags.is_pending) displayPks.add(pk);
+        if (u.lifecycle.status === STATUS.DEACTIVATED || u.lifecycle.status === STATUS.DELETED) displayPks.add(pk);
+    }
+    const picsToFetch = [...displayPks].filter(pk => {
+        const u = snapshot.users[pk];
+        return u?.profile_pic_url && !avatarsMap[pk];
+    });
 
     if (picsToFetch.length > 0) {
         sendProgress(`Profil resimleri yükleniyor... (0/${picsToFetch.length})`);
+        let successCount = 0;
         for (let i = 0; i < picsToFetch.length; i += 10) {
             const batch = picsToFetch.slice(i, i + 10);
             await Promise.allSettled(batch.map(async pk => {
-                const b64 = await fetchAsBase64(fullMap[pk].profile_pic_url);
-                if (b64) fullMap[pk].profile_pic_b64 = b64;
+                const b64 = await fetchAsBase64(snapshot.users[pk].profile_pic_url);
+                if (b64) { avatarsMap[pk] = b64; successCount++; }
             }));
             sendProgress(`Profil resimleri yükleniyor... (${Math.min(i + 10, picsToFetch.length)}/${picsToFetch.length})`);
         }
+        console.log(`[ig-analytics] Avatars: ${successCount}/${picsToFetch.length} fetched successfully (${Object.keys(avatarsMap).length} total in cache)`);
+    } else {
+        console.log(`[ig-analytics] Avatars: ${Object.keys(avatarsMap).length} already cached, no fetch needed`);
     }
 
-    // Enrich stats/requests arrays with base64 pics + latest data from fullMap.
-    // Without this, popup only has CDN URLs which don't load from extension context.
-    const enrichUser = (user) => {
-        const entry = fullMap[String(user.pk)];
-        if (entry) {
-            if (entry.profile_pic_b64)  user.profile_pic_b64 = entry.profile_pic_b64;
-            if (entry.profile_pic_url)  user.profile_pic_url = entry.profile_pic_url;
-        }
-    };
-    for (const list of [
-        snapshotToSave.stats.lost,
-        snapshotToSave.stats.new,
-        snapshotToSave.stats.not_back,
-        snapshotToSave.stats.fans,
-        snapshotToSave.stats.deactivated,
-        snapshotToSave.requests.pending,
-        snapshotToSave.requests.withdrawn,
-    ]) {
-        for (const user of (list || [])) enrichUser(user);
-    }
+    // Persist avatars locally for the popup
+    await chrome.storage.local.set({ ["avatars_" + scraped.userId]: avatarsMap });
 
-    // Engagement summary — full per-user breakdown for popup display (with pics)
-    const engagementSummary = {
-        ghost_count: newSnapshot.followers.filter(u => getEng(u.pk).score === 0).length,
-        weights: { post_likes: 2, story_views: 1, story_likes: 3 },
-        engagers: newSnapshot.followers
-            .filter(u => getEng(u.pk).score > 0)
-            .sort((a, b) => getEng(b.pk).score - getEng(a.pk).score)
-            .map(u => {
-                const e = getEng(u.pk);
-                const fm = fullMap[String(u.pk)];
-                return {
-                    pk: u.pk,
-                    username: u.username,
-                    full_name: u.full_name || "",
-                    profile_pic_url: fm?.profile_pic_url || u.profile_pic_url || null,
-                    profile_pic_b64: fm?.profile_pic_b64 || null,
-                    is_verified: u.is_verified || false,
-                    post_likes:  e.post_likes  || 0,
-                    story_views: e.story_views || 0,
-                    story_likes: e.story_likes || 0,
-                    score:       e.score       || 0
-                };
-            })
-    };
+    // ── Derive stats for popup (UI shape) ────────────────────────────────────
+    const stats = deriveStats(snapshot);
+    const engagement_summary = deriveEngagement(snapshot);
 
+    // Enrich derived users with locally-cached b64 pics so popup renders them
+    const enrich = (list) => list.map(u => ({ ...u, profile_pic_b64: avatarsMap[u.pk] || null }));
     const diffResult = {
-        ...snapshotToSave.stats,
-        engagement_summary: engagementSummary,
-        requests: snapshotToSave.requests
+        lost:        enrich(stats.lost),
+        not_back:    enrich(stats.not_back),
+        new:         enrich(stats.new),
+        fans:        enrich(stats.fans),
+        deactivated: enrich(stats.deactivated),
+        pending:     enrich(stats.pending),
+        engagement_summary: {
+            ...engagement_summary,
+            engagers: enrich(engagement_summary.engagers),
+        },
+        requests: {
+            pending:   enrich(stats.pending),
+            withdrawn: [],   // historical events only — not displayed as current state
+        },
     };
 
-    // ── Step 1: Persist results + clear busy state ────────────────────────────
+    // ── Step 1: Persist + clear busy state ───────────────────────────────────
     await chrome.storage.local.set({
         diff_result:       diffResult,
         sync_in_progress:  false,
-        sync_heartbeat:    null
+        sync_heartbeat:    null,
     });
 
-    // ── Step 2: Notify popup — user sees results immediately ──────────────────
+    // ── Step 2: Notify popup ─────────────────────────────────────────────────
     chrome.runtime.sendMessage({ type: "SYNC_COMPLETE", stats: diffResult }).catch(() => {});
 
-    // ── Step 3: Save to Drive in background (never blocks popup) ──────────────
-    saveToDriveInBackground(snapshotToSave, pendingChecks, newSnapshot.userId, 0);
+    // ── Step 3: Save to Drive in background ──────────────────────────────────
+    saveToDriveInBackground(snapshot, pendingStatusChecks, scraped.userId, 0, avatarsMap);
 }
 
-// ── Background Drive Save ─────────────────────────────────────────────────────
-// Runs AFTER SYNC_COMPLETE. Popup already shows results.
-// On failure: schedules a retry alarm instead of losing data.
+// ── Background Drive Save ────────────────────────────────────────────────────
 
-async function saveToDriveInBackground(snapshotToSave, pendingChecks, userId, retryCount = 0) {
-    // Mark as pending so a service worker restart can retry
+async function saveToDriveInBackground(snapshot, pendingChecks, userId, retryCount = 0, avatarsMap = null) {
     await chrome.storage.local.set({
-        pending_drive_snapshot:    snapshotToSave,
-        pending_drive_retry_count: retryCount
+        pending_drive_snapshot:    snapshot,
+        pending_drive_retry_count: retryCount,
+        pending_drive_userId:      userId,
     });
 
     try {
-        await saveSnapshot(snapshotToSave);
+        await saveSnapshot(snapshot);
+        if (avatarsMap && Object.keys(avatarsMap).length > 0) {
+            // Don't block on avatar upload — main snapshot is what web client needs.
+            saveAvatars(userId, avatarsMap).catch(err => {
+                console.warn("[ig-analytics] Avatars save failed (non-fatal):", err.message);
+            });
+        }
     } catch (err) {
+        console.error("[ig-analytics] Drive save failed:", err.message, err);
         const msg = translateDriveError(err.message);
         const isRetriable = ["DRIVE_AUTH_EXPIRED", "DRIVE_RATE_LIMITED"].includes(err.message)
+            || /DRIVE_ERROR_5\d{2}/.test(err.message || "")  // 5xx server errors
             || err.message?.includes("AbortError")
-            || err.message?.includes("network");
+            || err.message?.includes("network")
+            || err.message?.includes("Failed to fetch");
 
         if (isRetriable && retryCount < DRIVE_RETRY_MAX - 1) {
-            // Schedule retry via alarm (survives service worker restart)
             await chrome.storage.local.set({ pending_drive_retry_count: retryCount + 1 });
             chrome.alarms.create(ALARM_DRIVE_RETRY, { delayInMinutes: 2 });
             chrome.runtime.sendMessage({
@@ -418,21 +349,20 @@ async function saveToDriveInBackground(snapshotToSave, pendingChecks, userId, re
                 error: msg + " (otomatik yeniden deneme planlandı)"
             }).catch(() => {});
         } else {
-            // Non-retriable or max retries exhausted — clean up
-            await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count"]);
+            await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count", "pending_drive_userId"]);
             chrome.runtime.sendMessage({ type: "DRIVE_SAVE_FAILED", error: msg }).catch(() => {});
         }
         return;
     }
 
-    // Success — clean up and notify
-    await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count"]);
+    await chrome.storage.local.remove(["pending_drive_snapshot", "pending_drive_retry_count", "pending_drive_userId"]);
 
-    // Schedule deactivated status checks
+    // Schedule deactivated status checks (limit per run honored by alarm handler)
     if (pendingChecks.length > 0) {
+        const truncated = pendingChecks.slice(0, MAX_STATUS_CHECKS_PER_RUN);
         await chrome.storage.local.set({
-            pending_status_checks:  pendingChecks,
-            pending_checks_user_id: userId
+            pending_status_checks:  truncated,
+            pending_checks_user_id: userId,
         });
         const existing = await chrome.alarms.get(ALARM_STATUS_CHECK);
         if (!existing) {
@@ -443,7 +373,7 @@ async function saveToDriveInBackground(snapshotToSave, pendingChecks, userId, re
     chrome.runtime.sendMessage({ type: "DRIVE_SAVE_COMPLETE" }).catch(() => {});
 }
 
-// ── Deactivated Status Check Alarm Handler ────────────────────────────────────
+// ── Deactivated Status Check Alarm Handler ───────────────────────────────────
 
 async function runDeactivatedStatusChecks() {
     const { pending_status_checks, pending_checks_user_id } =
@@ -473,63 +403,43 @@ async function runDeactivatedStatusChecks() {
     }
 
     let driveSnapshot = null;
-    try {
-        driveSnapshot = await loadSnapshot(pending_checks_user_id);
-    } catch { /* Drive unreachable */ }
+    try { driveSnapshot = await loadSnapshot(pending_checks_user_id); }
+    catch { /* Drive unreachable */ }
     if (!driveSnapshot) return;
 
-    const currentDiff = {
-        lost:         driveSnapshot.stats?.lost        || [],
-        deactivated:  driveSnapshot.stats?.deactivated || [],
-        not_back:     driveSnapshot.stats?.not_back    || [],
-        newFollowers: driveSnapshot.stats?.new         || [],
-        fans:         driveSnapshot.stats?.fans        || []
-    };
+    const updatedSnapshot = applyStatusChecks(driveSnapshot, statusMap);
 
-    const pendingUsers = (driveSnapshot.stats?.pending_check || []).map(u => ({
-        ...u, pendingStatusCheck: true
-    }));
-    currentDiff.lost = [...currentDiff.lost, ...pendingUsers];
+    try { await saveSnapshot(updatedSnapshot); }
+    catch { return; }
 
-    const resolvedDiff = applyStatusChecks(currentDiff, statusMap);
-
-    const updatedSnapshot = {
-        ...driveSnapshot,
-        stats: {
-            lost:          resolvedDiff.lost,
-            not_back:      resolvedDiff.not_back,
-            new:           resolvedDiff.newFollowers,
-            fans:          resolvedDiff.fans,
-            deactivated:   resolvedDiff.deactivated,
-            pending_check: []
-        }
-    };
-
-    try {
-        await saveSnapshot(updatedSnapshot);
-    } catch { return; }
-
-    await chrome.storage.local.set({ diff_result: updatedSnapshot.stats, pending_status_checks: [] });
+    // Refresh popup diff result with new derive
+    const stats = deriveStats(updatedSnapshot);
+    const avatars = (await chrome.storage.local.get(["avatars_" + pending_checks_user_id]))["avatars_" + pending_checks_user_id] || {};
+    const enrich = (list) => list.map(u => ({ ...u, profile_pic_b64: avatars[u.pk] || null }));
+    await chrome.storage.local.set({
+        diff_result: {
+            lost:        enrich(stats.lost),
+            not_back:    enrich(stats.not_back),
+            new:         enrich(stats.new),
+            fans:        enrich(stats.fans),
+            deactivated: enrich(stats.deactivated),
+            pending:     enrich(stats.pending),
+        },
+        pending_status_checks: [],
+    });
     chrome.runtime.sendMessage({ type: "STATUS_CHECKS_COMPLETE" }).catch(() => {});
 }
 
-// ── History Builder ───────────────────────────────────────────────────────────
-
-function buildHistory(previousSnapshot, counts) {
-    if (typeof counts === "number") counts = { follower_count: counts };
-    if (!counts?.follower_count) return previousSnapshot?.history || [];
-    const previous = previousSnapshot?.history || [];
-    const entry = { timestamp: new Date().toISOString(), follower_count: counts.follower_count };
-    if (counts.following_count != null) entry.following_count = counts.following_count;
-    return [...previous.slice(-29), entry];
-}
-
-// ── Drive Error Translator ────────────────────────────────────────────────────
+// ── Drive Error Translator ───────────────────────────────────────────────────
 
 function translateDriveError(code) {
     if (code === "DRIVE_AUTH_EXPIRED")   return "Google oturumu sona erdi. Lütfen yeniden giriş yapın.";
     if (code === "DRIVE_NO_PERMISSION")  return "Google Drive erişim izni yok. Drive.appdata iznini kontrol edin.";
     if (code === "DRIVE_RATE_LIMITED")   return "Google Drive hız sınırı — birkaç dakika bekleyip tekrar deneyin.";
+    if (code?.startsWith("DRIVE_OAUTH_BAD_CLIENT_ID")) {
+        return "Google Cloud OAuth client ID extension ID ile eşleşmiyor. Service worker konsoluna bak (kırmızı log) ve GCP'de extension ID'yi kaydet.";
+    }
+    if (/DRIVE_ERROR_5\d{2}/.test(code || "")) return `Google Drive geçici hata (${code}) — otomatik tekrar denenecek.`;
     if (code?.startsWith("DRIVE_ERROR")) return `Drive hatası: ${code}`;
     return code || "Bilinmeyen hata";
 }
