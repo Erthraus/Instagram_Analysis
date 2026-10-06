@@ -18,7 +18,6 @@
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
-      "32": "icons/icon32.png",
       "128": "icons/icon128.png"
     }
   },
@@ -34,7 +33,6 @@
     "scopes": ["https://www.googleapis.com/auth/drive.appdata"]
   },
   "icons": {
-    "32": "icons/icon32.png",
     "128": "icons/icon128.png"
   }
 }
