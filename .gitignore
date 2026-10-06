@@ -9,6 +9,7 @@ build/
 # Environment & secrets
 .env
 .env.*
+!.env.example
 *.local
 
 # Chrome extension — local config overrides
