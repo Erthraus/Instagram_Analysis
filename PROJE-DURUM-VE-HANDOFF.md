@@ -12,7 +12,7 @@
 | | |
 |---|---|
 | **Durum** | 🟢 Çalışıyor — eklenti ve web arayüzü gerçek hesaplarla denendi (2026-10-04) |
-| **Son yapılan** | 2026-10-04 — Yerel iş repoya taşındı, 4 hata düzeltildi, eski veriyle geriye dönük takipçi farkı eklendi (PR #1 ile `main`'e birleştirildi) |
+| **Son yapılan** | 2026-10-06 — Eklenti tek ikon dosyası kullanıyor; depo tek kaynak haline getirildi (temiz kopyadan kurulum: Bölüm 7) |
 | **Sıradaki adım** | Sonuçları web arayüzünde incele (bkz. Bölüm 3); istenirse Bölüm 5'teki açık konulardan devam et |
 | **Senden beklenen karar** | Instagram ayarlarından eski oturumları kapat ve Çöp Kutusu'nu boşalt (bkz. Bölüm 5, madde 2). |
 
@@ -165,3 +165,25 @@ Ek fayda: web arayüzünün aldığı erişim anahtarı artık YouTube ve Sheets
 **Doğrulama:** Giriş isteğinin adresi tarayıcıda yakalandı. Önce: `include_granted_scopes=true`.
 Sonra: `include_granted_scopes=false`, istenen izinler `openid profile email drive.appdata`.
 Proje sahibi gerçek Google hesabıyla denedi: giriş çalışıyor (2026-10-04). PR #3 ile `main`'e birleştirildi.
+
+### 2026-10-06 — Tek ikon, depo tek kaynak
+
+- Eklenti araç çubuğunda 32 piksellik ayrı (bulanık) ikon dosyasını kullanıyordu. `manifest.json` artık her yerde
+  `icons/icon128.png` dosyasını gösteriyor; kullanılmayan `icon32.png` silindi.
+- Doğrulama: `manifest.json` geçerli, gösterdiği dosya mevcut, testler 70 / 70. Chrome'da görsel
+  kontrol yapılmadı (eklentiyi yeniden yükleyince görülür).
+- Temiz kopyadan kurulum için gerekenler Bölüm 7'ye yazıldı.
+
+## 7. Temiz kopyadan kurulum (depoda olmayanlar)
+
+Geliştirme depodan sürer; yerel bir kopya şart değildir. Aşağıdakiler bilinçli olarak depoda
+yoktur ve temiz bir kopyada yeniden sağlanmaları gerekir:
+
+| Ne | Neden gerekli | Nereden bulunur |
+|---|---|---|
+| `web_client/.env` içinde `VITE_GOOGLE_CLIENT_ID` | Web arayüzünde Google girişi | Google Cloud Console → APIs & Services → Credentials → "Web application" türündeki OAuth istemcisi. Örnek dosya: `web_client/.env.example` |
+| Eklentinin uzantı kimliği (extension ID) | Eklentinin Drive'a yazabilmesi | Paketlenmemiş (unpacked) eklentinin kimliği, yüklendiği klasörün yoluna bağlıdır. Klasör yolu değişirse kimlik de değişir; o zaman Google Cloud'daki "Chrome Extension" türündeki OAuth istemcisinin "Item ID" alanı yeni kimlikle güncellenmelidir |
+| Eski veri dosyası (`<kullanıcı>_data.json`) | Yalnızca geriye dönük fark için, bir kez | Kişisel veridir; depoya girmez |
+
+Bulut oturumunda (cloud session) testler ve web derlemesi çalışır. Eklentinin gerçek denemesi
+ise Chrome kurulu bir bilgisayar ve giriş yapılmış bir Instagram hesabı gerektirir.
